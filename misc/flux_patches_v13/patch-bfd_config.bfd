@@ -1,0 +1,12 @@
+--- bfd/config.bfd.orig	2023-07-09 22:26:45 UTC
++++ bfd/config.bfd
+@@ -693,7 +693,8 @@ case "${targ}" in
+     ;;
+   x86_64-*-dragonfly*)
+     targ_defvec=x86_64_elf64_vec
+-    targ_selvecs="i386_elf32_vec iamcu_elf32_vec"
++    targ_selvecs="i386_elf32_vec iamcu_elf32_vec i386_pei_vec x86_64_pe_vec"
++    targ_selvecs="${targ_selvecs} x86_64_pei_vec i386_elf32_vec x86_64_elf64_vec"
+     want64=true
+     ;;
+   x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)

@@ -1,0 +1,31 @@
+--- gdb/configure.nat.orig	2023-07-11 00:56:07 UTC
++++ gdb/configure.nat
+@@ -62,6 +62,11 @@ case ${gdb_host} in
+ 	NAT_CDEPS='$(srcdir)/proc-service.list'
+ 	LOADLIBES='-ldl $(RDYNAMIC)'
+ 	;;
++    dfly*)
++	NATDEPFILES='fork-child.o nat/fork-inferior.o inf-ptrace.o dfly-nat.o'
++	HAVE_NATIVE_GCORE_HOST=1
++	LOADLIBES='-lkvm'
++	;;
+     fbsd*)
+ 	NATDEPFILES='fork-child.o nat/fork-inferior.o inf-ptrace.o fbsd-nat.o'
+ 	HAVE_NATIVE_GCORE_HOST=1
+@@ -189,6 +194,16 @@ case ${gdb_host} in
+ 		;;
+ 	esac
+ 	;;
++    dfly64)
++	case ${gdb_host_cpu} in
++	    i386)
++		# Host: DragonFly/amd64
++		NATDEPFILES="${NATDEPFILES} amd64-nat.o \
++		amd64-dfly-nat.o bsd-kvm.o x86-nat.o nat/x86-dregs.o \
++		x86-bsd-nat.o x86-dfly-nat.o"
++		;;
++	esac
++	;;
+     fbsd64)
+ 	case ${gdb_host_cpu} in
+ 	    i386)
