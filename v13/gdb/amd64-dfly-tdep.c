@@ -119,28 +119,6 @@ int amd64dfly_sc_reg_offset[] =
   -1				/* %gs */
 };
 
-/* From /usr/src/lib/libc/amd64/gen/_setjmp.S.  */
-static int amd64dfly_jmp_buf_reg_offset[] =
-{
-  -1,				/* %rax */
-  1 * 8,			/* %rbx */
-  -1,				/* %rcx */
-  -1,				/* %rdx */
-  -1,				/* %rsi */
-  -1,				/* %rdi */
-  3 * 8,			/* %rbp */
-  2 * 8,			/* %rsp */
-  -1,				/* %r8 ... */
-  -1,
-  -1,
-  -1,				/* ... %r11 */
-  4 * 8,			/* %r12 ... */
-  5 * 8,
-  6 * 8,
-  7 * 8,			/* ... %r15 */
-  0 * 8				/* %rip */
-};
-
 static void
 amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 {

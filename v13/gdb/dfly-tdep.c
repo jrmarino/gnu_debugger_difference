@@ -132,15 +132,6 @@ struct dfly_gdbarch_data
 static const registry<gdbarch>::key<dfly_gdbarch_data>
      dfly_gdbarch_data_handle;
 
-static struct dfly_gdbarch_data *
-get_dfly_gdbarch_data (struct gdbarch *gdbarch)
-{
-  struct dfly_gdbarch_data *result = dfly_gdbarch_data_handle.get (gdbarch);
-  if (result == nullptr)
-    result = dfly_gdbarch_data_handle.emplace (gdbarch);
-  return result;
-}
-
 struct dfly_pspace_data
 {
   /* Offsets in the runtime linker's 'Obj_Entry' structure.  */
@@ -152,88 +143,6 @@ struct dfly_pspace_data
 /* Per-program-space data for FreeBSD architectures.  */
 static const registry<program_space>::key<dfly_pspace_data>
   dfly_pspace_data_handle;
-
-static struct dfly_pspace_data *
-get_dfly_pspace_data (struct program_space *pspace)
-{
-  struct dfly_pspace_data *data;
-
-  data = dfly_pspace_data_handle.get (pspace);
-  if (data == NULL)
-    data = dfly_pspace_data_handle.emplace (pspace);
-
-  return data;
-}
-
-/* This is how we want PTIDs from core files to be printed.  */
-
-static std::string
-dfly_core_pid_to_str (struct gdbarch *gdbarch, ptid_t ptid)
-{
-  static char buf[80];
-
-  if (ptid.lwp () != 0)
-    {
-      xsnprintf (buf, sizeof buf, "LWP %ld", ptid.lwp ());
-      return buf;
-    }
-
-  return normal_pid_to_str (ptid);
-}
-
-/* Helper function to generate the name of an IP protocol.  */
-
-static const char *
-dfly_ipproto (int protocol)
-{
-  switch (protocol)
-    {
-    case DFLY_IPPROTO_ICMP:
-      return "icmp";
-    case DFLY_IPPROTO_TCP:
-      return "tcp";
-    case DFLY_IPPROTO_UDP:
-      return "udp";
-    default:
-      {
-	char *str = get_print_cell ();
-
-	xsnprintf (str, PRINT_CELL_SIZE, "ip<%d>", protocol);
-	return str;
-      }
-    }
-}
-
-/* Helper function to print out an IPv4 socket address.  */
-
-static void
-dfly_print_sockaddr_in (const void *sockaddr)
-{
-  const struct dfly_sockaddr_in *sin =
-    reinterpret_cast<const struct dfly_sockaddr_in *> (sockaddr);
-  char buf[INET_ADDRSTRLEN];
-
-  if (inet_ntop (AF_INET, sin->sin_addr, buf, sizeof buf) == nullptr)
-    error (_("Failed to format IPv4 address"));
-  gdb_printf ("%s:%u", buf,
-		   (sin->sin_port[0] << 8) | sin->sin_port[1]);
-}
-
-/* Helper function to print out an IPv6 socket address.  */
-
-static void
-dfly_print_sockaddr_in6 (const void *sockaddr)
-{
-  const struct dfly_sockaddr_in6 *sin6 =
-    reinterpret_cast<const struct dfly_sockaddr_in6 *> (sockaddr);
-  char buf[INET6_ADDRSTRLEN];
-
-  if (inet_ntop (AF_INET6, sin6->sin6_addr, buf, sizeof buf) == nullptr)
-    error (_("Failed to format IPv6 address"));
-  gdb_printf ("%s.%u", buf,
-		   (sin6->sin6_port[0] << 8) | sin6->sin6_port[1]);
-}
-
 
 /* Implement the "gdb_signal_from_target" gdbarch method.  */
 
