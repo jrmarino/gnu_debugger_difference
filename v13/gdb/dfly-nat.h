@@ -21,9 +21,9 @@
 #define DFLY_NAT_H
 
 #include "inf-ptrace.h"
+#include <sys/user.h>
 
-
-/* A prototype DragonFly target.  */
+/* A prototype DragonFly target. */
 
 class dfly_nat_target : public inf_ptrace_target
 {
@@ -31,5 +31,13 @@ public:
   const char *pid_to_exec_file (int pid) override;
 
   int find_memory_regions (find_memory_region_ftype func, void *data) override;
+
+};
+
+#ifdef OLDCODE
+/* Register the customized DragonFly target.  This should be used
+   instead of calling add_target directly.  */
+extern void dfly_nat_add_target (struct target_ops *);
+#endif
 
 #endif /* dfly-nat.h */

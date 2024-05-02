@@ -18,6 +18,8 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "defs.h"
+#include "arch-utils.h"
+#include "gdbcore.h"
 #include "osabi.h"
 #include "regcache.h"
 #include "regset.h"
@@ -27,7 +29,6 @@
 #include "i387-tdep.h"
 #include "dfly-tdep.h"
 #include "solib-svr4.h"
-#include "inferior.h"
 
 static int i386dfly_r_reg_offset[] =
 {
@@ -101,6 +102,8 @@ i386dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 
 }
 
+
+/* Provide a prototype to silence -Wmissing-prototypes.  */
 void _initialize_i386dfly_tdep ();
 
 void

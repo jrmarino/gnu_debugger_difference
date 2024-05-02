@@ -39,7 +39,6 @@
 #include "amd64-bsd-nat.h"
 #include "x86-nat.h"
 #include "gdbsupport/x86-xstate.h"
-
 
 class amd64_dfly_nat_target final
   : public amd64_bsd_nat_target<dfly_nat_target>
@@ -48,6 +47,12 @@ public:
   /* Add some extra features to the common *BSD/amd64 target.  */
   const struct target_desc *read_description () override;
 
+#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
+  bool supports_stopped_by_hw_breakpoint () override;
+#endif
+
+protected:
+  void post_startup_inferior (ptid_t) override;
 };
 
 static amd64_dfly_nat_target the_amd64_dfly_nat_target;
@@ -232,7 +237,45 @@ amd64_dfly_nat_target::read_description ()
     return i386_target_description (X86_XSTATE_SSE_MASK, true);
 }
 
+#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
+/* Implement the supports_stopped_by_hw_breakpoints method.  */
 
+bool
+amd64_dfly_nat_target::supports_stopped_by_hw_breakpoint ()
+{
+  return true;
+}
+#endif
+
+void
+amd64_dfly_nat_target::post_startup_inferior (ptid_t pid)
+{
+#ifdef PT_GET_EVENT_MASK
+  int events;
+
+  if (ptrace (PT_GET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,
+	      sizeof (events)) == -1)
+    perror_with_name (("ptrace (PT_GET_EVENT_MASK)"));
+  events |= PTRACE_FORK | PTRACE_LWP;
+#ifdef PTRACE_VFORK
+  events |= PTRACE_VFORK;
+#endif
+  if (ptrace (PT_SET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,
+	      sizeof (events)) == -1)
+    perror_with_name (("ptrace (PT_SET_EVENT_MASK)"));
+#else
+#ifdef TDP_RFPPWAIT
+  if (ptrace (PT_FOLLOW_FORK, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)
+    perror_with_name (("ptrace (PT_FOLLOW_FORK)"));
+#endif
+#ifdef PT_LWP_EVENTS
+  if (ptrace (PT_LWP_EVENTS, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)
+    perror_with_name (("ptrace (PT_LWP_EVENTS)"));
+#endif
+#endif
+}
+
+void _initialize_amd64dfly_nat (void);
 void
 _initialize_amd64dfly_nat (void)
 {

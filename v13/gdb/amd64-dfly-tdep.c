@@ -32,14 +32,11 @@
 #include "dfly-tdep.h"
 #include "solib-svr4.h"
 
-/* Support for signal handlers.  */
-
-
 /* Assuming THIS_FRAME is for a BSD sigtramp routine, return the
    address of the associated sigcontext structure.  */
 
 static CORE_ADDR
-amd64dfly_sigcontext_addr (struct frame_info *this_frame)
+amd64dfly_sigcontext_addr (struct frame_info_ptr this_frame)
 {
   struct gdbarch *gdbarch = get_frame_arch (this_frame);
   enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
@@ -147,7 +144,7 @@ static int amd64dfly_jmp_buf_reg_offset[] =
 static void
 amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 {
-  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+  i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
 
   /* Generic DragonFly support. */
   dfly_init_abi (info, gdbarch);
@@ -168,7 +165,6 @@ amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
   tdep->sc_reg_offset = amd64dfly_sc_reg_offset;
   tdep->sc_num_regs = ARRAY_SIZE (amd64dfly_sc_reg_offset);
 
-
   /* FreeBSD uses SVR4-style shared libraries.  */
   set_solib_svr4_fetch_link_map_offsets
     (gdbarch, svr4_lp64_fetch_link_map_offsets);
@@ -177,8 +173,9 @@ amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 					     svr4_fetch_objfile_link_map);
 }
 
+void _initialize_amd64dfly_tdep ();
 void
-_initialize_amd64dfly_tdep (void)
+_initialize_amd64dfly_tdep ()
 {
   gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64,
 			  GDB_OSABI_DRAGONFLY, amd64dfly_init_abi);

@@ -18,9 +18,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "defs.h"
-#include "gdbsupport/block-signals.h"
 #include "gdbsupport/byte-vector.h"
-#include "gdbsupport/event-loop.h"
 #include "gdbcore.h"
 #include "inferior.h"
 #include "regcache.h"
@@ -28,20 +26,18 @@
 #include "gdbarch.h"
 #include "gdbcmd.h"
 #include "gdbthread.h"
-#include "gdbsupport/buildargv.h"
 #include "gdbsupport/gdb_wait.h"
-#include "inf-loop.h"
 #include "inf-ptrace.h"
 #include <sys/types.h>
-#ifdef HAVE_SYS_PROCCTL_H
-#include <sys/procctl.h>
-#endif
 #include <sys/procfs.h>
 #include <sys/ptrace.h>
 #include <sys/signal.h>
 #include <sys/sysctl.h>
 #include <sys/user.h>
+#ifdef HAVE_KINFO_GETVMMAP
 #include <libutil.h>
+#endif
+#include "gdbsupport/filestuff.h"
 
 #include "elf-bfd.h"
 #include "dfly-nat.h"
@@ -55,7 +51,11 @@
 const char *
 dfly_nat_target::pid_to_exec_file (int pid)
 {
+  ssize_t len;
   static char buf[PATH_MAX];
+  char name[PATH_MAX];
+
+#ifdef KERN_PROC_PATHNAME
   size_t buflen;
   int mib[4];
 
@@ -69,10 +69,18 @@ dfly_nat_target::pid_to_exec_file (int pid)
        for processes without an associated executable such as kernel
        processes.  */
     return buflen == 0 ? NULL : buf;
+#endif
+
+  xsnprintf (name, PATH_MAX, "/proc/%d/exe", pid);
+  len = readlink (name, buf, PATH_MAX - 1);
+  if (len != -1)
+    {
+      buf[len] = '\0';
+      return buf;
+    }
 
   return NULL;
 }
-
 
 static int
 dfly_read_mapping (FILE *mapfile, unsigned long *start, unsigned long *end,
@@ -84,6 +92,10 @@ dfly_read_mapping (FILE *mapfile, unsigned long *start, unsigned long *end,
   unsigned long obj;
   int ret = EOF;
 
+  /* As of FreeBSD 5.0-RELEASE, the layout is described in
+     /usr/src/sys/fs/procfs/procfs_map.c.  Somewhere in 5.1-CURRENT a
+     new column was added to the procfs map.  Therefore we can't use
+     fscanf since we need to support older releases too.  */
   if (fgets (buf, sizeof buf, mapfile) != NULL)
     ret = sscanf (buf, "%lx %lx %d %d %lx %s", start, end,
 		  &resident, &privateresident, &obj, protection);
@@ -91,14 +103,13 @@ dfly_read_mapping (FILE *mapfile, unsigned long *start, unsigned long *end,
   return (ret != 0 && ret != EOF);
 }
 
-
 /* Iterate over all the memory regions in the current inferior,
-   calling FUNC for each memory region.  DATA is passed as the last
+   calling FUNC for each memory region.  OBFD is passed as the last
    argument to FUNC.  */
 
 int
 dfly_nat_target::find_memory_regions (find_memory_region_ftype func,
-				      void *data)
+				      void *obfd)
 {
   pid_t pid = inferior_ptid.pid ();
   unsigned long start, end, size;
@@ -111,7 +122,7 @@ dfly_nat_target::find_memory_regions (find_memory_region_ftype func,
     error (_("Couldn't open %s."), mapfilename.c_str ());
 
   if (info_verbose)
-    fprintf_filtered (gdb_stdout, 
+    gdb_printf (gdb_stdout,
 		      "Reading memory regions from %s\n", mapfilename.c_str ());
 
   /* Now iterate until end-of-file.  */
@@ -125,7 +136,7 @@ dfly_nat_target::find_memory_regions (find_memory_region_ftype func,
 
       if (info_verbose)
 	{
-	  fprintf_filtered (gdb_stdout, 
+	  gdb_printf (gdb_stdout,
 			    "Save segment, %ld bytes at %s (%c%c%c)\n",
 			    size, paddress (target_gdbarch (), start),
 			    read ? 'r' : '-',
@@ -135,19 +146,29 @@ dfly_nat_target::find_memory_regions (find_memory_region_ftype func,
 
       /* Invoke the callback function to create the corefile segment.
 	 Pass MODIFIED as true, we do not know the real modification state.  */
-      func (start, size, read, write, exec, 1, obfd);
+      func (start, size, read, write, exec, 1, false, obfd);
     }
 
   return 0;
 }
 
-void _initialize_dfly_nat ();
+#ifdef OLDCODE
+void
+dfly_nat_add_target (struct target_ops *t)
+{
+  t->to_pid_to_exec_file = dfly_pid_to_exec_file;
+  t->to_find_memory_regions = dfly_find_memory_regions;
+  /* XXX: thread vfork support */
+  add_target (t);
+}
+#endif
 
+/* Provide a prototype to silence -Wmissing-prototypes.  */
+extern initialize_file_ftype _initialize_dfly_nat;
+
+void _initialize_dfly_nat ();
 void
 _initialize_dfly_nat ()
 {
-  /* XXX: todo add_setshow_boolean_cmd() */
-
-  /* Install a SIGCHLD handler.  */
-  //signal (SIGCHLD, sigchld_handler);
+/* XXX: todo add_setshow_boolean_cmd() */
 }

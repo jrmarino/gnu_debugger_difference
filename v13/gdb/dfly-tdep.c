@@ -1,4 +1,4 @@
-/* Target-dependent code for FreeBSD, architecture-independent.
+/* Target-dependent code for DragonFly, architecture-independent.
 
    Copyright (C) 2002-2023 Free Software Foundation, Inc.
 
@@ -21,7 +21,6 @@
 #include "auxv.h"
 #include "gdbcore.h"
 #include "inferior.h"
-#include "objfiles.h"
 #include "regcache.h"
 #include "regset.h"
 #include "gdbthread.h"
@@ -32,9 +31,8 @@
 
 #include "elf-bfd.h"
 #include "dfly-tdep.h"
-#include "gcore-elf.h"
 
-/* This enum is derived from DragonFly's <sys/signal.h>.  */
+/* This enum is derived from FreeBSD's <sys/signal.h>.  */
 
 enum
   {
@@ -70,58 +68,10 @@ enum
     DRAGONFLY_SIGUSR1 = 30,
     DRAGONFLY_SIGUSR2 = 31,
     DRAGONFLY_SIGTHR = 32,
+    DRAGONFLY_SIGCKPT = 33,
+    DRAGONFLY_SIGCKPTEXIT = 34,
   };
 
-/* Constants for values of si_code as defined in DragonFly's
-   <sys/_siginfo.h>.  */
-
-#define	DFLY_SI_USER		0
-#define	DFLY_SI_QUEUE		-1
-#define	DFLY_SI_TIMER		-2
-#define	DFLY_SI_ASYNCIO		-3
-#define	DFLY_SI_MESGQ		-4
-
-#define	DFLY_ILL_ILLOPC		1
-#define	DFLY_ILL_ILLOPN		2
-#define	DFLY_ILL_ILLADR		3
-#define	DFLY_ILL_ILLTRP		4
-#define	DFLY_ILL_PRVOPC		5
-#define	DFLY_ILL_PRVREG		6
-#define	DFLY_ILL_COPROC		7
-#define	DFLY_ILL_BADSTK		8
-
-#define	DFLY_BUS_ADRALN		1
-#define	DFLY_BUS_ADRERR		2
-#define	DFLY_BUS_OBJERR		3
-
-#define	DFLY_SEGV_MAPERR	1
-#define	DFLY_SEGV_ACCERR	2
-
-#define	DFLY_FPE_INTOVF		1
-#define	DFLY_FPE_INTDIV		2
-#define	DFLY_FPE_FLTDIV		3
-#define	DFLY_FPE_FLTOVF		4
-#define	DFLY_FPE_FLTUND		5
-#define	DFLY_FPE_FLTRES		6
-#define	DFLY_FPE_FLTINV		7
-#define	DFLY_FPE_FLTSUB		8
-
-#define	DFLY_TRAP_BRKPT		1
-#define	DFLY_TRAP_TRACE		2
-
-#define	DFLY_CLD_EXITED		1
-#define	DFLY_CLD_KILLED		2
-#define	DFLY_CLD_DUMPED		3
-#define	DFLY_CLD_TRAPPED	4
-#define	DFLY_CLD_STOPPED	5
-#define	DFLY_CLD_CONTINUED	6
-
-#define	DFLY_POLL_IN		1
-#define	DFLY_POLL_OUT		2
-#define	DFLY_POLL_MSG		3
-#define	DFLY_POLL_ERR		4
-#define	DFLY_POLL_PRI		5
-#define	DFLY_POLL_HUP		6
 
 /* Constants for socket address families.  These match AF_* constants
    in <sys/socket.h>.  */
@@ -140,13 +90,12 @@ enum
 /* Constants for IP protocols.  These match IPPROTO_* constants in
    <netinet/in.h>.  */
 
-#define DFLY_IPPROTO_IP		0
 #define	DFLY_IPPROTO_ICMP	1
 #define	DFLY_IPPROTO_TCP	6
 #define	DFLY_IPPROTO_UDP	17
 
 /* Socket address structures.  These have the same layout on all
-   architectures.  In addition, multibyte fields such as IP
+   DragonFly architectures.  In addition, multibyte fields such as IP
    addresses are always stored in network byte order.  */
 
 struct dfly_sockaddr_in
@@ -198,13 +147,6 @@ struct dfly_pspace_data
   LONGEST off_linkmap = 0;
   LONGEST off_tlsindex = 0;
   bool rtld_offsets_valid = false;
-
-  /* vDSO mapping range.  */
-  struct mem_range vdso_range {};
-
-  /* Zero if the range hasn't been searched for, > 0 if a range was
-     found, or < 0 if a range was not found.  */
-  int vdso_range_p = 0;
 };
 
 /* Per-program-space data for FreeBSD architectures.  */
@@ -222,6 +164,76 @@ get_dfly_pspace_data (struct program_space *pspace)
 
   return data;
 }
+
+/* This is how we want PTIDs from core files to be printed.  */
+
+static std::string
+dfly_core_pid_to_str (struct gdbarch *gdbarch, ptid_t ptid)
+{
+  static char buf[80];
+
+  if (ptid.lwp () != 0)
+    {
+      xsnprintf (buf, sizeof buf, "LWP %ld", ptid.lwp ());
+      return buf;
+    }
+
+  return normal_pid_to_str (ptid);
+}
+
+/* Helper function to generate the name of an IP protocol.  */
+
+static const char *
+dfly_ipproto (int protocol)
+{
+  switch (protocol)
+    {
+    case DFLY_IPPROTO_ICMP:
+      return "icmp";
+    case DFLY_IPPROTO_TCP:
+      return "tcp";
+    case DFLY_IPPROTO_UDP:
+      return "udp";
+    default:
+      {
+	char *str = get_print_cell ();
+
+	xsnprintf (str, PRINT_CELL_SIZE, "ip<%d>", protocol);
+	return str;
+      }
+    }
+}
+
+/* Helper function to print out an IPv4 socket address.  */
+
+static void
+dfly_print_sockaddr_in (const void *sockaddr)
+{
+  const struct dfly_sockaddr_in *sin =
+    reinterpret_cast<const struct dfly_sockaddr_in *> (sockaddr);
+  char buf[INET_ADDRSTRLEN];
+
+  if (inet_ntop (AF_INET, sin->sin_addr, buf, sizeof buf) == nullptr)
+    error (_("Failed to format IPv4 address"));
+  gdb_printf ("%s:%u", buf,
+		   (sin->sin_port[0] << 8) | sin->sin_port[1]);
+}
+
+/* Helper function to print out an IPv6 socket address.  */
+
+static void
+dfly_print_sockaddr_in6 (const void *sockaddr)
+{
+  const struct dfly_sockaddr_in6 *sin6 =
+    reinterpret_cast<const struct dfly_sockaddr_in6 *> (sockaddr);
+  char buf[INET6_ADDRSTRLEN];
+
+  if (inet_ntop (AF_INET6, sin6->sin6_addr, buf, sizeof buf) == nullptr)
+    error (_("Failed to format IPv6 address"));
+  gdb_printf ("%s.%u", buf,
+		   (sin6->sin6_port[0] << 8) | sin6->sin6_port[1]);
+}
+
 
 /* Implement the "gdb_signal_from_target" gdbarch method.  */
 
@@ -326,12 +338,6 @@ dfly_gdb_signal_from_target (struct gdbarch *gdbarch, int signal)
     case DRAGONFLY_SIGUSR2:
       return GDB_SIGNAL_USR2;
 
-    /* SIGTHR is the same as SIGLWP on FreeBSD. */
-    case DRAGONFLY_SIGTHR:
-      return GDB_SIGNAL_LWP;
-
-    case DRAGONFLY_SIGLIBRT:
-      return GDB_SIGNAL_LIBRT;
     }
 
   return GDB_SIGNAL_UNKNOWN;
@@ -341,7 +347,7 @@ dfly_gdb_signal_from_target (struct gdbarch *gdbarch, int signal)
 
 static int
 dfly_gdb_signal_to_target (struct gdbarch *gdbarch,
-		enum gdb_signal signal)
+               enum gdb_signal signal)
 {
   switch (signal)
     {
@@ -441,257 +447,17 @@ dfly_gdb_signal_to_target (struct gdbarch *gdbarch,
     case GDB_SIGNAL_USR2:
       return DRAGONFLY_SIGUSR2;
 
-    case GDB_SIGNAL_LWP:
-      return DRAGONFLY_SIGTHR;
-
-    case GDB_SIGNAL_LIBRT:
-      return DRAGONFLY_SIGLIBRT;
-    }
-
-  if (signal >= GDB_SIGNAL_REALTIME_65
-      && signal <= GDB_SIGNAL_REALTIME_126)
-    {
-      int offset = signal - GDB_SIGNAL_REALTIME_65;
-
-      return DRAGONFLY_SIGRTMIN + offset;
     }
 
   return -1;
 }
-
-
-/* Return description of signal code or nullptr.  */
-
-#if 0
-static const char *
-dfly_signal_cause (enum gdb_signal siggnal, int code)
-{
-  /* Signal-independent causes.  */
-  switch (code)
-    {
-    case DFLY_SI_USER:
-      return _("Sent by kill()");
-    case DFLY_SI_QUEUE:
-      return _("Sent by sigqueue()");
-    case DFLY_SI_TIMER:
-      return _("Timer expired");
-    case DFLY_SI_ASYNCIO:
-      return _("Asynchronous I/O request completed");
-    case DFLY_SI_MESGQ:
-      return _("Message arrived on empty message queue");
-    }
-
-  switch (siggnal)
-    {
-    case GDB_SIGNAL_ILL:
-      switch (code)
-	{
-	case DFLY_ILL_ILLOPC:
-	  return _("Illegal opcode");
-	case DFLY_ILL_ILLOPN:
-	  return _("Illegal operand");
-	case DFLY_ILL_ILLADR:
-	  return _("Illegal addressing mode");
-	case DFLY_ILL_ILLTRP:
-	  return _("Illegal trap");
-	case DFLY_ILL_PRVOPC:
-	  return _("Privileged opcode");
-	case DFLY_ILL_PRVREG:
-	  return _("Privileged register");
-	case DFLY_ILL_COPROC:
-	  return _("Coprocessor error");
-	case DFLY_ILL_BADSTK:
-	  return _("Internal stack error");
-	}
-      break;
-    case GDB_SIGNAL_BUS:
-      switch (code)
-	{
-	case DFLY_BUS_ADRALN:
-	  return _("Invalid address alignment");
-	case DFLY_BUS_ADRERR:
-	  return _("Address not present");
-	case DFLY_BUS_OBJERR:
-	  return _("Object-specific hardware error");
-	}
-      break;
-    case GDB_SIGNAL_SEGV:
-      switch (code)
-	{
-	case DFLY_SEGV_MAPERR:
-	  return _("Address not mapped to object");
-	case DFLY_SEGV_ACCERR:
-	  return _("Invalid permissions for mapped object");
-	}
-      break;
-    case GDB_SIGNAL_FPE:
-      switch (code)
-	{
-	case DFLY_FPE_INTOVF:
-	  return _("Integer overflow");
-	case DFLY_FPE_INTDIV:
-	  return _("Integer divide by zero");
-	case DFLY_FPE_FLTDIV:
-	  return _("Floating point divide by zero");
-	case DFLY_FPE_FLTOVF:
-	  return _("Floating point overflow");
-	case DFLY_FPE_FLTUND:
-	  return _("Floating point underflow");
-	case DFLY_FPE_FLTRES:
-	  return _("Floating point inexact result");
-	case DFLY_FPE_FLTINV:
-	  return _("Invalid floating point operation");
-	case DFLY_FPE_FLTSUB:
-	  return _("Subscript out of range");
-	}
-      break;
-    case GDB_SIGNAL_TRAP:
-      switch (code)
-	{
-	case DFLY_TRAP_BRKPT:
-	  return _("Breakpoint");
-	case DFLY_TRAP_TRACE:
-	  return _("Trace trap");
-	}
-      break;
-    case GDB_SIGNAL_CHLD:
-      switch (code)
-	{
-	case DFLY_CLD_EXITED:
-	  return _("Child has exited");
-	case DFLY_CLD_KILLED:
-	  return _("Child has terminated abnormally");
-	case DFLY_CLD_DUMPED:
-	  return _("Child has dumped core");
-	case DFLY_CLD_TRAPPED:
-	  return _("Traced child has trapped");
-	case DFLY_CLD_STOPPED:
-	  return _("Child has stopped");
-	case DFLY_CLD_CONTINUED:
-	  return _("Stopped child has continued");
-	}
-      break;
-    case GDB_SIGNAL_POLL:
-      switch (code)
-	{
-	case DFLY_POLL_IN:
-	  return _("Data input available");
-	case DFLY_POLL_OUT:
-	  return _("Output buffers available");
-	case DFLY_POLL_MSG:
-	  return _("Input message available");
-	case DFLY_POLL_ERR:
-	  return _("I/O error");
-	case DFLY_POLL_PRI:
-	  return _("High priority input available");
-	case DFLY_POLL_HUP:
-	  return _("Device disconnected");
-	}
-      break;
-    }
-
-  return nullptr;
-}
-#endif
-
-/* Print descriptions of DragonFly-specific AUXV entries to FILE.  */
-
-static void
-dfly_print_auxv_entry (struct gdbarch *gdbarch, struct ui_file *file,
-		       CORE_ADDR type, CORE_ADDR val)
-{
-  const char *name = "???";
-  const char *description = "";
-  enum auxv_format format = AUXV_FORMAT_HEX;
-
-  switch (type)
-    {
-    case AT_NULL:
-    case AT_IGNORE:
-    case AT_EXECFD:
-    case AT_PHDR:
-    case AT_PHENT:
-    case AT_PHNUM:
-    case AT_PAGESZ:
-    case AT_BASE:
-    case AT_FLAGS:
-    case AT_ENTRY:
-    case AT_NOTELF:
-    case AT_UID:
-    case AT_EUID:
-    case AT_GID:
-    case AT_EGID:
-      default_print_auxv_entry (gdbarch, file, type, val);
-      return;
-#define _TAGNAME(tag) #tag
-#define TAGNAME(tag) _TAGNAME(AT_##tag)
-#define TAG(tag, text, kind) \
-      case AT_FREEBSD_##tag: name = TAGNAME(tag); description = text; format = kind; break
-      TAG (EXECPATH, _("Executable path"), AUXV_FORMAT_STR);
-      TAG (CANARY, _("Canary for SSP"), AUXV_FORMAT_HEX);
-      TAG (CANARYLEN, ("Length of the SSP canary"), AUXV_FORMAT_DEC);
-      TAG (OSRELDATE, _("OSRELDATE"), AUXV_FORMAT_DEC);
-      TAG (NCPUS, _("Number of CPUs"), AUXV_FORMAT_DEC);
-      TAG (PAGESIZES, _("Pagesizes"), AUXV_FORMAT_HEX);
-      TAG (PAGESIZESLEN, _("Number of pagesizes"), AUXV_FORMAT_DEC);
-      TAG (STACKPROT, _("Initial stack protection"), AUXV_FORMAT_HEX);
-      TAG (EHDRFLAGS, _("ELF header e_flags"), AUXV_FORMAT_HEX);
-      TAG (HWCAP, _("Machine-dependent CPU capability hints"), AUXV_FORMAT_HEX);
-      TAG (HWCAP2, _("Extension of AT_HWCAP"), AUXV_FORMAT_HEX);
-      TAG (BSDFLAGS, _("ELF BSD flags"), AUXV_FORMAT_HEX);
-      TAG (ARGC, _("Argument count"), AUXV_FORMAT_DEC);
-      TAG (ARGV, _("Argument vector"), AUXV_FORMAT_HEX);
-      TAG (ENVC, _("Environment count"), AUXV_FORMAT_DEC);
-      TAG (ENVV, _("Environment vector"), AUXV_FORMAT_HEX);
-      TAG (PS_STRINGS, _("Pointer to ps_strings"), AUXV_FORMAT_HEX);
-      TAG (FXRNG, _("Pointer to root RNG seed version"), AUXV_FORMAT_HEX);
-      TAG (KPRELOAD, _("Base address of vDSO"), AUXV_FORMAT_HEX);
-      TAG (USRSTACKBASE, _("Top of user stack"), AUXV_FORMAT_HEX);
-      TAG (USRSTACKLIM, _("Grow limit of user stack"), AUXV_FORMAT_HEX);
-    }
-
-  fprint_auxv_entry (file, name, description, format, type, val);
-}
-
-
-/* See fbsd-tdep.h.  */
-
-CORE_ADDR
-dfly_skip_solib_resolver (struct gdbarch *gdbarch, CORE_ADDR pc)
-{
-  struct bound_minimal_symbol msym = lookup_bound_minimal_symbol ("_rtld_bind");
-  if (msym.minsym != nullptr && msym.value_address () == pc)
-    return frame_unwind_caller_pc (get_current_frame ());
-
-  return 0;
-}
-
-
 
 /* To be called from GDB_OSABI_DRAGONFLY handlers. */
 
 void
 dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 {
-#if 0
-  set_gdbarch_core_pid_to_str (gdbarch, dfly_core_pid_to_str);
-  set_gdbarch_core_thread_name (gdbarch, dfly_core_thread_name);
-  set_gdbarch_core_xfer_siginfo (gdbarch, dfly_core_xfer_siginfo);
-  set_gdbarch_make_corefile_notes (gdbarch, dfly_make_corefile_notes);
-  set_gdbarch_core_info_proc (gdbarch, dfly_core_info_proc);
-  set_gdbarch_get_siginfo_type (gdbarch, dfly_get_siginfo_type);
-#endif
-  set_gdbarch_print_auxv_entry (gdbarch, dfly_print_auxv_entry);
   set_gdbarch_gdb_signal_from_target (gdbarch, dfly_gdb_signal_from_target);
   set_gdbarch_gdb_signal_to_target (gdbarch, dfly_gdb_signal_to_target);
-  set_gdbarch_skip_solib_resolver (gdbarch, dfly_skip_solib_resolver);
 
-#if 0
-  set_gdbarch_report_signal_info (gdbarch, dfly_report_signal_info);
-  set_gdbarch_vsyscall_range (gdbarch, dfly_vsyscall_range);
-
-  /* `catch syscall' */
-  set_xml_syscall_file_name (gdbarch, "syscalls/dragonfly.xml");
-  set_gdbarch_get_syscall_number (gdbarch, dfly_get_syscall_number);
-#endif
 }
