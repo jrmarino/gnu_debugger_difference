@@ -1429,6 +1429,53 @@
 +  gdbarch_register_osabi (bfd_arch_i386, 0, GDB_OSABI_DRAGONFLY,
 +			  i386dfly_init_abi);
 +}
+--- gdb/Makefile.in.orig
++++ gdb/Makefile.in
+@@ -709,6 +709,7 @@
+ 	alpha-tdep.o \
+ 	amd64-darwin-tdep.o \
+ 	amd64-dicos-tdep.o \
++	amd64-dfly-tdep.o \
+ 	amd64-fbsd-tdep.o \
+ 	amd64-linux-tdep.o \
+ 	amd64-netbsd-tdep.o \
+@@ -781,6 +782,7 @@
+ 	csky-linux-tdep.o \
+ 	csky-tdep.o \
+ 	dicos-tdep.o \
++	dfly-tdep.o \
+ 	fbsd-tdep.o \
+ 	frv-linux-tdep.o \
+ 	frv-tdep.o \
+@@ -795,6 +797,7 @@
+ 	i386-bsd-tdep.o \
+ 	i386-darwin-tdep.o \
+ 	i386-dicos-tdep.o \
++	i386-dfly-tdep.o \
+ 	i386-fbsd-tdep.o \
+ 	i386-gnu-tdep.o \
+ 	i386-go32-tdep.o \
+@@ -1323,6 +1326,8 @@
+ 	extension-priv.h \
+ 	f-array-walker.h \
+ 	f-lang.h \
++	dfly-nat.h \
++	dfly-tdep.h \
+ 	fbsd-nat.h \
+ 	fbsd-tdep.h \
+ 	filesystem.h \
+--- gdb/amd64-tdep.h.orig
++++ gdb/amd64-tdep.h
+@@ -144,4 +144,9 @@
+ /* Variables exported from amd64-obsd-tdep.c.  */
+ extern int amd64obsd_r_reg_offset[];
+ 
++/* Variables exported from amd64-dfly-tdep.c.  */
++extern CORE_ADDR amd64dfly_sigtramp_start_addr;
++extern CORE_ADDR amd64dfly_sigtramp_end_addr;
++extern int amd64dfly_sc_reg_offset[];
++
+ #endif /* amd64-tdep.h */
 --- gdb/bsd-kvm.c.orig
 +++ gdb/bsd-kvm.c
 @@ -328,7 +328,9 @@

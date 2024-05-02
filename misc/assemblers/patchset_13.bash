@@ -96,8 +96,8 @@ pattern="^gdb"
 main=`cd $BUGDIFF && find * -type d | sort | ${GREPPROG} -E $pattern`
 reset_patch ${MAIN_SUFFIX}
 produce_patch ${MAIN_SUFFIX} main[@]
-regenerate_patch ${REST_SUFFIX} patch-gdb_Makefile.in
-regenerate_patch ${REST_SUFFIX} patch-gdb_amd64-tdep.h
+regenerate_patch ${MAIN_SUFFIX} patch-gdb_Makefile.in
+regenerate_patch ${MAIN_SUFFIX} patch-gdb_amd64-tdep.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_bsd-kvm.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.host
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.nat
