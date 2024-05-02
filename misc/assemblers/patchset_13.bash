@@ -96,7 +96,8 @@ pattern="^gdb"
 main=`cd $BUGDIFF && find * -type d | sort | ${GREPPROG} -E $pattern`
 reset_patch ${MAIN_SUFFIX}
 produce_patch ${MAIN_SUFFIX} main[@]
-regenerate_patch ${MAIN_SUFFIX} patch-gdb_aarch64-linux-tdep.c
+regenerate_patch ${REST_SUFFIX} patch-gdb_Makefile.in
+regenerate_patch ${REST_SUFFIX} patch-gdb_amd64-tdep.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_bsd-kvm.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.host
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.nat
@@ -104,13 +105,13 @@ regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.tgt
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_fbsd-nat.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_gdb.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_gdb__wchar.h
+regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-bsd-nat.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-fbsd-nat.c
+regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-tdep.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_inflow.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_osabi.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_osabi.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_python_python-config.py
-regenerate_patch ${MAIN_SUFFIX} patch-gdb_s390-tdep.c
-regenerate_patch ${MAIN_SUFFIX} patch-gdb_sparc64-linux-tdep.c
 
 reset_patch ${REST_SUFFIX}
 regenerate_patch ${REST_SUFFIX} patch-bfd_config.bfd

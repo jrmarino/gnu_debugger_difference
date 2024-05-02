@@ -173,9 +173,9 @@ amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
 					     svr4_fetch_objfile_link_map);
 }
 
-void _initialize_amd64dfly_tdep ();
+void _initialize_amd64dfly_tdep (void);
 void
-_initialize_amd64dfly_tdep ()
+_initialize_amd64dfly_tdep (void)
 {
   gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64,
 			  GDB_OSABI_DRAGONFLY, amd64dfly_init_abi);
