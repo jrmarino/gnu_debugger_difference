@@ -1351,6 +1351,42 @@
  	fbsd-nat.h \
  	fbsd-tdep.h \
  	filesystem.h \
+--- gdb/aarch64-linux-tdep.c.orig
++++ gdb/aarch64-linux-tdep.c
+@@ -1775,13 +1775,13 @@
+     return;
+ 
+   CORE_ADDR fault_addr = 0;
+-  long si_code = 0;
++  long db_si_code = 0;
+ 
+   try
+     {
+       /* Sigcode tells us if the segfault is actually a memory tag
+ 	 violation.  */
+-      si_code = parse_and_eval_long ("$_siginfo.si_code");
++      db_si_code = parse_and_eval_long ("$_siginfo.si_code");
+ 
+       fault_addr
+ 	= parse_and_eval_long ("$_siginfo._sifields._sigfault.si_addr");
+@@ -1793,7 +1793,7 @@
+     }
+ 
+   /* If this is not a memory tag violation, just return.  */
+-  if (si_code != SEGV_MTEAERR && si_code != SEGV_MTESERR)
++  if (db_si_code != SEGV_MTEAERR && db_si_code != SEGV_MTESERR)
+     return;
+ 
+   uiout->text ("\n");
+@@ -1801,7 +1801,7 @@
+   uiout->field_string ("sigcode-meaning", _("Memory tag violation"));
+ 
+   /* For synchronous faults, show additional information.  */
+-  if (si_code == SEGV_MTESERR)
++  if (db_si_code == SEGV_MTESERR)
+     {
+       uiout->text (_(" while accessing address "));
+       uiout->field_core_addr ("fault-addr", gdbarch, fault_addr);
 --- gdb/amd64-tdep.h.orig
 +++ gdb/amd64-tdep.h
 @@ -144,4 +144,9 @@
@@ -1624,3 +1660,33 @@
          if getvar("LIBS") is not None:
              libs.extend(getvar("LIBS").split())
          if getvar("SYSLIBS") is not None:
+--- gdb/sparc64-linux-tdep.c.orig
++++ gdb/sparc64-linux-tdep.c
+@@ -129,14 +129,14 @@
+     return;
+ 
+   CORE_ADDR addr = 0;
+-  long si_code = 0;
++  long db_si_code = 0;
+ 
+   try
+     {
+-      /* Evaluate si_code to see if the segfault is ADI related.  */
+-      si_code = parse_and_eval_long ("$_siginfo.si_code\n");
++      /* Evaluate db_si_code to see if the segfault is ADI related.  */
++      db_si_code = parse_and_eval_long ("$_siginfo.si_code\n");
+ 
+-      if (si_code >= SEGV_ACCADI && si_code <= SEGV_ADIPERR)
++      if (db_si_code >= SEGV_ACCADI && db_si_code <= SEGV_ADIPERR)
+ 	addr = parse_and_eval_long ("$_siginfo._sifields._sigfault.si_addr");
+     }
+   catch (const gdb_exception &exception)
+@@ -145,7 +145,7 @@
+     }
+ 
+   /* Print out ADI event based on sig_code value */
+-  switch (si_code)
++  switch (db_si_code)
+     {
+     case SEGV_ACCADI:	/* adi not enabled */
+       uiout->text ("\n");
