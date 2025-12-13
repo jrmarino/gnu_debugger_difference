@@ -1,0 +1,1641 @@
+--- /dev/null
++++ gdb/amd64-dfly-nat.c
+@@ -0,0 +1,360 @@
++/* Native-dependent code for DragonFly/amd64.
++
++   Copyright (C) 2003-2019 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "inferior.h"
++#include "regcache.h"
++#include "target.h"
++#include "gregset.h"
++
++#include <signal.h>
++#include <stddef.h>
++#include <sys/types.h>
++#include <sys/procfs.h>
++#include <sys/ptrace.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <machine/reg.h>
++#include <machine/segments.h>
++
++#include "dfly-nat.h"
++#include "amd64-tdep.h"
++#include "amd64-nat.h"
++#include "amd64-bsd-nat.h"
++#include "x86-nat.h"
++#include "gdbsupport/x86-xstate.h"
++
++class amd64_dfly_nat_target final
++  : public amd64_bsd_nat_target<dfly_nat_target>
++{
++public:
++  /* Add some extra features to the common *BSD/amd64 target.  */
++  const struct target_desc *read_description () override;
++
++#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
++  bool supports_stopped_by_hw_breakpoint () override;
++#endif
++
++protected:
++  void post_startup_inferior (ptid_t) override;
++};
++
++static amd64_dfly_nat_target the_amd64_dfly_nat_target;
++
++/* Offset in `struct reg' where MEMBER is stored.  */
++#define REG_OFFSET(member) offsetof (struct reg, member)
++
++/* At amd64dfly64_r_reg_offset[REGNUM] you'll find the offset in
++   `struct reg' location where the GDB register REGNUM is stored.
++   Unsupported registers are marked with `-1'.  */
++static int amd64dfly64_r_reg_offset[] =
++{
++  REG_OFFSET (r_rax),
++  REG_OFFSET (r_rbx),
++  REG_OFFSET (r_rcx),
++  REG_OFFSET (r_rdx),
++  REG_OFFSET (r_rsi),
++  REG_OFFSET (r_rdi),
++  REG_OFFSET (r_rbp),
++  REG_OFFSET (r_rsp),
++  REG_OFFSET (r_r8),
++  REG_OFFSET (r_r9),
++  REG_OFFSET (r_r10),
++  REG_OFFSET (r_r11),
++  REG_OFFSET (r_r12),
++  REG_OFFSET (r_r13),
++  REG_OFFSET (r_r14),
++  REG_OFFSET (r_r15),
++  REG_OFFSET (r_rip),
++  REG_OFFSET (r_rflags),
++  REG_OFFSET (r_cs),
++  REG_OFFSET (r_ss),
++  -1,
++  -1,
++  -1,
++  -1
++};
++
++
++/* Mapping between the general-purpose registers in DragonFly/amd64
++   `struct reg' format and GDB's register cache layout for
++   DragonFly/x86.
++
++   Note that most DragonFly/amd64 registers are 64-bit, while the
++   DragonFly/x86 registers are all 32-bit, but since we're
++   little-endian we get away with that.  */
++
++/* From <machine/reg.h>.  */
++static int amd64dfly32_r_reg_offset[I386_NUM_GREGS] =
++{
++  14 * 8, 13 * 8,		/* %eax, %ecx */
++  12 * 8, 11 * 8,		/* %edx, %ebx */
++  20 * 8, 10 * 8,		/* %esp, %ebp */
++  9 * 8, 8 * 8,			/* %esi, %edi */
++  17 * 8, 19 * 8,		/* %eip, %eflags */
++  18 * 8, 21 * 8,		/* %cs, %ss */
++  -1, -1, -1, -1		/* %ds, %es, %fs, %gs */
++};
++
++
++#ifdef DFLY_PCB_SUPPLY
++/* Transfering the registers between GDB, inferiors and core files.  */
++
++/* Fill GDB's register array with the general-purpose register values
++   in *GREGSETP.  */
++
++void
++supply_gregset (struct regcache *regcache, const gregset_t *gregsetp)
++{
++  amd64_supply_native_gregset (regcache, gregsetp, -1);
++}
++
++/* Fill register REGNUM (if it is a general-purpose register) in
++   *GREGSETPS with the value in GDB's register array.  If REGNUM is -1,
++   do this for all registers.  */
++
++void
++fill_gregset (const struct regcache *regcache, gdb_gregset_t *gregsetp, int regnum)
++{
++  amd64_collect_native_gregset (regcache, gregsetp, regnum);
++}
++
++/* Fill GDB's register array with the floating-point register values
++   in *FPREGSETP.  */
++
++void
++supply_fpregset (struct regcache *regcache, const fpregset_t *fpregsetp)
++{
++  amd64_supply_fxsave (regcache, -1, fpregsetp);
++}
++
++/* Fill register REGNUM (if it is a floating-point register) in
++   *FPREGSETP with the value in GDB's register array.  If REGNUM is -1,
++   do this for all registers.  */
++
++void
++fill_fpregset (const struct regcache *regcache, gdb_fpregset_t *fpregsetp, int regnum)
++{
++  amd64_collect_fxsave (regcache, regnum, fpregsetp);
++}
++
++/* Support for debugging kernel virtual memory images.  */
++
++#include <sys/types.h>
++#include <machine/pcb.h>
++#include <osreldate.h>
++
++#include "bsd-kvm.h"
++
++static int
++amd64dfly_supply_pcb (struct regcache *regcache, struct pcb *pcb)
++{
++  /* The following is true for FreeBSD 5.2:
++
++     The pcb contains %rip, %rbx, %rsp, %rbp, %r12, %r13, %r14, %r15,
++     %ds, %es, %fs and %gs.  This accounts for all callee-saved
++     registers specified by the psABI and then some.  Here %esp
++     contains the stack pointer at the point just after the call to
++     cpu_switch().  From this information we reconstruct the register
++     state as it would like when we just returned from cpu_switch().  */
++
++  /* The stack pointer shouldn't be zero.  */
++  if (pcb->pcb_rsp == 0)
++    return 0;
++
++  pcb->pcb_rsp += 8;
++  regcache->raw_supply (AMD64_RIP_REGNUM, &pcb->pcb_rip);
++  regcache->raw_supply (AMD64_RBX_REGNUM, &pcb->pcb_rbx);
++  regcache->raw_supply (AMD64_RSP_REGNUM, &pcb->pcb_rsp);
++  regcache->raw_supply (AMD64_RBP_REGNUM, &pcb->pcb_rbp);
++  regcache->raw_supply (12, &pcb->pcb_r12);
++  regcache->raw_supply (13, &pcb->pcb_r13);
++  regcache->raw_supply (14, &pcb->pcb_r14);
++  regcache->raw_supply (15, &pcb->pcb_r15);
++
++  return 1;
++}
++#endif /* DFLY_PCB_SUPPLY */
++
++
++/* Implement the read_description method.  */
++
++const struct target_desc *
++amd64_dfly_nat_target::read_description ()
++{
++#ifdef PT_GETXSTATE_INFO
++  static int xsave_probed;
++  static uint64_t xcr0;
++#endif
++  struct reg regs;
++  int is64;
++
++  if (ptrace (PT_GETREGS, inferior_ptid.pid (),
++	      (PTRACE_TYPE_ARG3) &regs, 0) == -1)
++    perror_with_name (_("Couldn't get registers"));
++  is64 = (regs.r_cs == GSEL (GUCODE_SEL, SEL_UPL));
++#ifdef PT_GETXSTATE_INFO
++  if (!xsave_probed)
++    {
++      struct ptrace_xstate_info info;
++
++      if (ptrace (PT_GETXSTATE_INFO, inferior_ptid.pid (),
++		  (PTRACE_TYPE_ARG3) &info, sizeof (info)) == 0)
++	{
++	  x86bsd_xsave_len = info.xsave_len;
++	  xcr0 = info.xsave_mask;
++	}
++      xsave_probed = 1;
++    }
++
++  if (x86bsd_xsave_len != 0)
++    {
++      if (is64)
++	return amd64_target_description (xcr0, true);
++      else
++	return i386_target_description (xcr0, true);
++    }
++#endif
++  if (is64)
++    return amd64_target_description (X86_XSTATE_SSE_MASK, true);
++  else
++    return i386_target_description (X86_XSTATE_SSE_MASK, true);
++}
++
++#if defined(HAVE_PT_GETDBREGS) && defined(USE_SIGTRAP_SIGINFO)
++/* Implement the supports_stopped_by_hw_breakpoints method.  */
++
++bool
++amd64_dfly_nat_target::supports_stopped_by_hw_breakpoint ()
++{
++  return true;
++}
++#endif
++
++void
++amd64_dfly_nat_target::post_startup_inferior (ptid_t pid)
++{
++#ifdef PT_GET_EVENT_MASK
++  int events;
++
++  if (ptrace (PT_GET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,
++	      sizeof (events)) == -1)
++    perror_with_name (("ptrace (PT_GET_EVENT_MASK)"));
++  events |= PTRACE_FORK | PTRACE_LWP;
++#ifdef PTRACE_VFORK
++  events |= PTRACE_VFORK;
++#endif
++  if (ptrace (PT_SET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,
++	      sizeof (events)) == -1)
++    perror_with_name (("ptrace (PT_SET_EVENT_MASK)"));
++#else
++#ifdef TDP_RFPPWAIT
++  if (ptrace (PT_FOLLOW_FORK, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)
++    perror_with_name (("ptrace (PT_FOLLOW_FORK)"));
++#endif
++#ifdef PT_LWP_EVENTS
++  if (ptrace (PT_LWP_EVENTS, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)
++    perror_with_name (("ptrace (PT_LWP_EVENTS)"));
++#endif
++#endif
++}
++
++void _initialize_amd64dfly_nat ();
++void
++_initialize_amd64dfly_nat ()
++{
++  int offset;
++
++  amd64_native_gregset32_reg_offset = amd64dfly32_r_reg_offset;
++  amd64_native_gregset64_reg_offset = amd64dfly64_r_reg_offset;
++
++  add_inf_child_target (&the_amd64_dfly_nat_target);
++
++#ifdef DFLY_PCB_SUPPLY
++  /* Support debugging kernel virtual memory images.  */
++  bsd_kvm_add_target (amd64dfly_supply_pcb);
++#endif
++
++  /* To support the recognition of signal handlers, i386-bsd-tdep.c
++     hardcodes some constants.  Inclusion of this file means that we
++     are compiling a native debugger, which means that we can use the
++     system header files and sysctl(3) to get at the relevant
++     information.  */
++
++#define SC_REG_OFFSET amd64dfly_sc_reg_offset
++
++  /* We only check the program counter, stack pointer and frame
++     pointer since these members of `struct sigcontext' are essential
++     for providing backtraces.  */
++
++#define SC_RIP_OFFSET SC_REG_OFFSET[AMD64_RIP_REGNUM]
++#define SC_RSP_OFFSET SC_REG_OFFSET[AMD64_RSP_REGNUM]
++#define SC_RBP_OFFSET SC_REG_OFFSET[AMD64_RBP_REGNUM]
++
++  /* Override the default value for the offset of the program counter
++     in the sigcontext structure.  */
++  offset = offsetof (struct sigcontext, sc_rip);
++
++  if (SC_RIP_OFFSET != offset)
++    {
++      warning (_("\
++offsetof (struct sigcontext, sc_rip) yields %d instead of %d.\n\
++Please report this to <bug-gdb@gnu.org>."),
++	       offset, SC_RIP_OFFSET);
++    }
++
++  SC_RIP_OFFSET = offset;
++
++  /* Likewise for the stack pointer.  */
++  offset = offsetof (struct sigcontext, sc_rsp);
++
++  if (SC_RSP_OFFSET != offset)
++    {
++      warning (_("\
++offsetof (struct sigcontext, sc_rsp) yields %d instead of %d.\n\
++Please report this to <bug-gdb@gnu.org>."),
++	       offset, SC_RSP_OFFSET);
++    }
++
++  SC_RSP_OFFSET = offset;
++
++  /* And the frame pointer.  */
++  offset = offsetof (struct sigcontext, sc_rbp);
++
++  if (SC_RBP_OFFSET != offset)
++    {
++      warning (_("\
++offsetof (struct sigcontext, sc_rbp) yields %d instead of %d.\n\
++Please report this to <bug-gdb@gnu.org>."),
++	       offset, SC_RBP_OFFSET);
++    }
++
++  SC_RBP_OFFSET = offset;
++
++  {
++    struct kinfo_sigtramp kst = {0};
++    size_t len = sizeof (kst);
++    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_SIGTRAMP };
++    if (sysctl (mib, 3, &kst, &len, NULL, 0) == 0)
++      {
++        amd64dfly_sigtramp_start_addr = (uintptr_t) kst.ksigtramp_start;
++        amd64dfly_sigtramp_end_addr   = (uintptr_t) kst.ksigtramp_end;
++      }
++  }
++}
+--- /dev/null
++++ gdb/amd64-dfly-tdep.c
+@@ -0,0 +1,161 @@
++/* Target-dependent code for DragonFly/amd64.
++
++   Copyright (C) 2003-2019 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "arch-utils.h"
++#include "frame.h"
++#include "gdbcore.h"
++#include "extract-store-integer.h"
++#include "regcache.h"
++#include "osabi.h"
++#include "regset.h"
++#include "gdbsupport/x86-xstate.h"
++
++#include <string.h>
++
++#include "amd64-tdep.h"
++#include "dfly-tdep.h"
++#include "solib-svr4.h"
++
++/* Assuming THIS_FRAME is for a BSD sigtramp routine, return the
++   address of the associated sigcontext structure.  */
++
++static CORE_ADDR
++amd64dfly_sigcontext_addr (const frame_info_ptr &this_frame)
++{
++  struct gdbarch *gdbarch = get_frame_arch (this_frame);
++  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
++  CORE_ADDR sp;
++  gdb_byte buf[8];
++
++  /* The `struct sigcontext' (which really is an `ucontext_t' on
++     DragonFly/amd64) lives at a fixed offset in the signal frame.  See
++     <machine/sigframe.h>.  */
++  get_frame_register (this_frame, AMD64_RSP_REGNUM, buf);
++  sp = extract_unsigned_integer (buf, 8, byte_order);
++  return sp + 16;
++}
++
++/* Mapping between the general-purpose registers in `struct reg'
++   format and GDB's register cache layout.
++
++   Note that some registers are 32-bit, but since we're little-endian
++   we get away with that.  */
++
++/* From <machine/reg.h>.  */
++static int amd64dfly_r_reg_offset[] =
++{
++  6 * 8,			/* %rax */
++  7 * 8,			/* %rbx */
++  3 * 8,			/* %rcx */
++  2 * 8,			/* %rdx */
++  1 * 8,			/* %rsi */
++  0 * 8,			/* %rdi */
++  8 * 8,			/* %rbp */
++  23 * 8,			/* %rsp */
++  4 * 8,			/* %r8 ... */
++  5 * 8,
++  9 * 8,
++  10 * 8,
++  11 * 8,
++  12 * 8,
++  13 * 8,
++  14 * 8,			/* ... %r15 */
++  20 * 8,			/* %rip */
++  22 * 8,			/* %eflags */
++  21 * 8,			/* %cs */
++  24 * 8,			/* %ss */
++  -1,				/* %ds */
++  -1,				/* %es */
++  -1,				/* %fs */
++  -1				/* %gs */
++};
++
++/* Location of the signal trampoline.  */
++CORE_ADDR amd64dfly_sigtramp_start_addr = 0x7fffffffffc0ULL;
++CORE_ADDR amd64dfly_sigtramp_end_addr = 0x7fffffffffe0ULL;
++
++/* From <machine/signal.h>.  */
++int amd64dfly_sc_reg_offset[] =
++{
++  24 + 6 * 8,			/* %rax */
++  24 + 7 * 8,			/* %rbx */
++  24 + 3 * 8,			/* %rcx */
++  24 + 2 * 8,			/* %rdx */
++  24 + 1 * 8,			/* %rsi */
++  24 + 0 * 8,			/* %rdi */
++  24 + 8 * 8,			/* %rbp */
++  24 + 23 * 8,			/* %rsp */
++  24 + 4 * 8,			/* %r8 ... */
++  24 + 5 * 8,
++  24 + 9 * 8,
++  24 + 10 * 8,
++  24 + 11 * 8,
++  24 + 12 * 8,
++  24 + 13 * 8,
++  24 + 14 * 8,			/* ... %r15 */
++  24 + 20 * 8,			/* %rip */
++  24 + 22 * 8,			/* %eflags */
++  24 + 21 * 8,			/* %cs */
++  24 + 24 * 8,			/* %ss */
++  -1,				/* %ds */
++  -1,				/* %es */
++  -1,				/* %fs */
++  -1				/* %gs */
++};
++
++static void
++amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++  i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
++
++  /* Generic DragonFly support. */
++  dfly_init_abi (info, gdbarch);
++
++  /* Obviously DragonFly is BSD-based.  */
++  i386bsd_init_abi (info, gdbarch);
++
++  tdep->gregset_reg_offset = amd64dfly_r_reg_offset;
++  tdep->gregset_num_regs = ARRAY_SIZE (amd64dfly_r_reg_offset);
++  tdep->sizeof_gregset = 25 * 8;
++
++  amd64_init_abi (info, gdbarch,
++		  amd64_target_description (X86_XSTATE_SSE_MASK, true));
++
++  tdep->sigtramp_start = amd64dfly_sigtramp_start_addr;
++  tdep->sigtramp_end = amd64dfly_sigtramp_end_addr;
++  tdep->sigcontext_addr = amd64dfly_sigcontext_addr;
++  tdep->sc_reg_offset = amd64dfly_sc_reg_offset;
++  tdep->sc_num_regs = ARRAY_SIZE (amd64dfly_sc_reg_offset);
++
++  /* FreeBSD uses SVR4-style shared libraries.  */
++  set_solib_svr4_fetch_link_map_offsets
++    (gdbarch, svr4_lp64_fetch_link_map_offsets);
++
++  set_gdbarch_fetch_tls_load_module_address (gdbarch,
++					     svr4_fetch_objfile_link_map);
++}
++
++void _initialize_amd64dfly_tdep ();
++void
++_initialize_amd64dfly_tdep ()
++{
++  gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64,
++			  GDB_OSABI_DRAGONFLY, amd64dfly_init_abi);
++}
+--- /dev/null
++++ gdb/dfly-nat.c
+@@ -0,0 +1,173 @@
++/* Native-dependent code for DragonFly.
++
++   Copyright (C) 2002-2023 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "gdbsupport/byte-vector.h"
++#include "gdbcore.h"
++#include "inferior.h"
++#include "regcache.h"
++#include "regset.h"
++#include "gdbarch.h"
++#include "gdbthread.h"
++#include "gdbsupport/gdb_wait.h"
++#include "inf-ptrace.h"
++#include <sys/types.h>
++#include <sys/procfs.h>
++#include <sys/ptrace.h>
++#include <sys/signal.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#ifdef HAVE_KINFO_GETVMMAP
++#include <libutil.h>
++#endif
++#include "gdbsupport/filestuff.h"
++
++#include "elf-bfd.h"
++#include "dfly-nat.h"
++#include "dfly-tdep.h"
++
++#include <list>
++
++/* Return the name of a file that can be opened to get the symbols for
++   the child process identified by PID.  */
++
++const char *
++dfly_nat_target::pid_to_exec_file (int pid)
++{
++  ssize_t len;
++  static char buf[PATH_MAX];
++  char name[PATH_MAX];
++
++#ifdef KERN_PROC_PATHNAME
++  size_t buflen;
++  int mib[4];
++
++  mib[0] = CTL_KERN;
++  mib[1] = KERN_PROC;
++  mib[2] = KERN_PROC_PATHNAME;
++  mib[3] = pid;
++  buflen = sizeof buf;
++  if (sysctl (mib, 4, buf, &buflen, NULL, 0) == 0)
++    /* The kern.proc.pathname.<pid> sysctl returns a length of zero
++       for processes without an associated executable such as kernel
++       processes.  */
++    return buflen == 0 ? NULL : buf;
++#endif
++
++  xsnprintf (name, PATH_MAX, "/proc/%d/exe", pid);
++  len = readlink (name, buf, PATH_MAX - 1);
++  if (len != -1)
++    {
++      buf[len] = '\0';
++      return buf;
++    }
++
++  return NULL;
++}
++
++static int
++dfly_read_mapping (FILE *mapfile, unsigned long *start, unsigned long *end,
++		   char *protection)
++{
++  /* FreeBSD 5.1-RELEASE uses a 256-byte buffer.  */
++  char buf[256];
++  int resident, privateresident;
++  unsigned long obj;
++  int ret = EOF;
++
++  /* As of FreeBSD 5.0-RELEASE, the layout is described in
++     /usr/src/sys/fs/procfs/procfs_map.c.  Somewhere in 5.1-CURRENT a
++     new column was added to the procfs map.  Therefore we can't use
++     fscanf since we need to support older releases too.  */
++  if (fgets (buf, sizeof buf, mapfile) != NULL)
++    ret = sscanf (buf, "%lx %lx %d %d %lx %s", start, end,
++		  &resident, &privateresident, &obj, protection);
++
++  return (ret != 0 && ret != EOF);
++}
++
++/* Iterate over all the memory regions in the current inferior,
++   calling FUNC for each memory region.  OBFD is passed as the last
++   argument to FUNC.  */
++
++int
++dfly_nat_target::find_memory_regions (find_memory_region_ftype func,
++				      void *obfd)
++{
++  pid_t pid = inferior_ptid.pid ();
++  unsigned long start, end, size;
++  char protection[4];
++  int read, write, exec;
++
++  std::string mapfilename = string_printf ("/proc/%ld/map", (long) pid);
++  gdb_file_up mapfile (fopen (mapfilename.c_str (), "r"));
++  if (mapfile == NULL)
++    error (_("Couldn't open %s."), mapfilename.c_str ());
++
++  if (info_verbose)
++    gdb_printf (gdb_stdout,
++		      "Reading memory regions from %s\n", mapfilename.c_str ());
++
++  /* Now iterate until end-of-file.  */
++  while (dfly_read_mapping (mapfile.get (), &start, &end, &protection[0]))
++    {
++      size = end - start;
++
++      read = (strchr (protection, 'r') != 0);
++      write = (strchr (protection, 'w') != 0);
++      exec = (strchr (protection, 'x') != 0);
++
++      if (info_verbose)
++	{
++	  gdb_printf (gdb_stdout,
++			    "Save segment, %ld bytes at %s (%c%c%c)\n",
++			    size, paddress (current_inferior ()->arch (), start),
++			    read ? 'r' : '-',
++			    write ? 'w' : '-',
++			    exec ? 'x' : '-');
++	}
++
++      /* Invoke the callback function to create the corefile segment.
++	 Pass MODIFIED as true, we do not know the real modification state.  */
++      func (start, size, read, write, exec, 1, false, obfd);
++    }
++
++  return 0;
++}
++
++#ifdef OLDCODE
++void
++dfly_nat_add_target (struct target_ops *t)
++{
++  t->to_pid_to_exec_file = dfly_pid_to_exec_file;
++  t->to_find_memory_regions = dfly_find_memory_regions;
++  /* XXX: thread vfork support */
++  add_target (t);
++}
++#endif
++
++/* Provide a prototype to silence -Wmissing-prototypes.  */
++extern initialize_file_ftype _initialize_dfly_nat;
++
++void _initialize_dfly_nat ();
++void
++_initialize_dfly_nat ()
++{
++/* XXX: todo add_setshow_boolean_cmd() */
++}
+--- /dev/null
++++ gdb/dfly-nat.h
+@@ -0,0 +1,43 @@
++/* Native-dependent code for DragonFly.
++
++   Copyright (C) 2004-2023 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#ifndef DFLY_NAT_H
++#define DFLY_NAT_H
++
++#include "inf-ptrace.h"
++#include <sys/user.h>
++
++/* A prototype DragonFly target. */
++
++class dfly_nat_target : public inf_ptrace_target
++{
++public:
++  const char *pid_to_exec_file (int pid) override;
++
++  int find_memory_regions (find_memory_region_ftype func, void *data) override;
++
++};
++
++#ifdef OLDCODE
++/* Register the customized DragonFly target.  This should be used
++   instead of calling add_target directly.  */
++extern void dfly_nat_add_target (struct target_ops *);
++#endif
++
++#endif /* dfly-nat.h */
+--- /dev/null
++++ gdb/dfly-tdep.c
+@@ -0,0 +1,372 @@
++/* Target-dependent code for DragonFly, architecture-independent.
++
++   Copyright (C) 2002-2023 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "auxv.h"
++#include "gdbcore.h"
++#include "inferior.h"
++#include "regcache.h"
++#include "regset.h"
++#include "gdbthread.h"
++#include "objfiles.h"
++#include "xml-syscall.h"
++#include <sys/socket.h>
++#include <arpa/inet.h>
++
++#include "elf-bfd.h"
++#include "dfly-tdep.h"
++
++/* This enum is derived from FreeBSD's <sys/signal.h>.  */
++
++enum
++  {
++    DRAGONFLY_SIGHUP = 1,
++    DRAGONFLY_SIGINT = 2,
++    DRAGONFLY_SIGQUIT = 3,
++    DRAGONFLY_SIGILL = 4,
++    DRAGONFLY_SIGTRAP = 5,
++    DRAGONFLY_SIGABRT = 6,
++    DRAGONFLY_SIGEMT = 7,
++    DRAGONFLY_SIGFPE = 8,
++    DRAGONFLY_SIGKILL = 9,
++    DRAGONFLY_SIGBUS = 10,
++    DRAGONFLY_SIGSEGV = 11,
++    DRAGONFLY_SIGSYS = 12,
++    DRAGONFLY_SIGPIPE = 13,
++    DRAGONFLY_SIGALRM = 14,
++    DRAGONFLY_SIGTERM = 15,
++    DRAGONFLY_SIGURG = 16,
++    DRAGONFLY_SIGSTOP = 17,
++    DRAGONFLY_SIGTSTP = 18,
++    DRAGONFLY_SIGCONT = 19,
++    DRAGONFLY_SIGCHLD = 20,
++    DRAGONFLY_SIGTTIN = 21,
++    DRAGONFLY_SIGTTOU = 22,
++    DRAGONFLY_SIGIO = 23,
++    DRAGONFLY_SIGXCPU = 24,
++    DRAGONFLY_SIGXFSZ = 25,
++    DRAGONFLY_SIGVTALRM = 26,
++    DRAGONFLY_SIGPROF = 27,
++    DRAGONFLY_SIGWINCH = 28,
++    DRAGONFLY_SIGINFO = 29,
++    DRAGONFLY_SIGUSR1 = 30,
++    DRAGONFLY_SIGUSR2 = 31,
++    DRAGONFLY_SIGTHR = 32,
++    DRAGONFLY_SIGCKPT = 33,
++    DRAGONFLY_SIGCKPTEXIT = 34,
++  };
++
++
++/* Constants for socket address families.  These match AF_* constants
++   in <sys/socket.h>.  */
++
++#define	DFLY_AF_UNIX		1
++#define	DFLY_AF_INET		2
++#define	DFLY_AF_INET6		28
++
++/* Constants for socket types.  These match SOCK_* constants in
++   <sys/socket.h>.  */
++
++#define	DFLY_SOCK_STREAM	1
++#define	DFLY_SOCK_DGRAM		2
++#define	DFLY_SOCK_SEQPACKET	5
++
++/* Constants for IP protocols.  These match IPPROTO_* constants in
++   <netinet/in.h>.  */
++
++#define	DFLY_IPPROTO_ICMP	1
++#define	DFLY_IPPROTO_TCP	6
++#define	DFLY_IPPROTO_UDP	17
++
++/* Socket address structures.  These have the same layout on all
++   DragonFly architectures.  In addition, multibyte fields such as IP
++   addresses are always stored in network byte order.  */
++
++struct dfly_sockaddr_in
++{
++  uint8_t sin_len;
++  uint8_t sin_family;
++  uint8_t sin_port[2];
++  uint8_t sin_addr[4];
++  char sin_zero[8];
++};
++
++struct dfly_sockaddr_in6
++{
++  uint8_t sin6_len;
++  uint8_t sin6_family;
++  uint8_t sin6_port[2];
++  uint32_t sin6_flowinfo;
++  uint8_t sin6_addr[16];
++  uint32_t sin6_scope_id;
++};
++
++struct dfly_sockaddr_un
++{
++  uint8_t sun_len;
++  uint8_t sun_family;
++  char sun_path[104];
++};
++
++struct dfly_gdbarch_data
++  {
++    struct type *siginfo_type = nullptr;
++  };
++
++static const registry<gdbarch>::key<dfly_gdbarch_data>
++     dfly_gdbarch_data_handle;
++
++struct dfly_pspace_data
++{
++  /* Offsets in the runtime linker's 'Obj_Entry' structure.  */
++  LONGEST off_linkmap = 0;
++  LONGEST off_tlsindex = 0;
++  bool rtld_offsets_valid = false;
++};
++
++/* Per-program-space data for FreeBSD architectures.  */
++static const registry<program_space>::key<dfly_pspace_data>
++  dfly_pspace_data_handle;
++
++/* Implement the "gdb_signal_from_target" gdbarch method.  */
++
++static enum gdb_signal
++dfly_gdb_signal_from_target (struct gdbarch *gdbarch, int signal)
++{
++  switch (signal)
++    {
++    case 0:
++      return GDB_SIGNAL_0;
++
++    case DRAGONFLY_SIGHUP:
++      return GDB_SIGNAL_HUP;
++
++    case DRAGONFLY_SIGINT:
++      return GDB_SIGNAL_INT;
++
++    case DRAGONFLY_SIGQUIT:
++      return GDB_SIGNAL_QUIT;
++
++    case DRAGONFLY_SIGILL:
++      return GDB_SIGNAL_ILL;
++
++    case DRAGONFLY_SIGTRAP:
++      return GDB_SIGNAL_TRAP;
++
++    case DRAGONFLY_SIGABRT:
++      return GDB_SIGNAL_ABRT;
++
++    case DRAGONFLY_SIGEMT:
++      return GDB_SIGNAL_EMT;
++
++    case DRAGONFLY_SIGFPE:
++      return GDB_SIGNAL_FPE;
++
++    case DRAGONFLY_SIGKILL:
++      return GDB_SIGNAL_KILL;
++
++    case DRAGONFLY_SIGBUS:
++      return GDB_SIGNAL_BUS;
++
++    case DRAGONFLY_SIGSEGV:
++      return GDB_SIGNAL_SEGV;
++
++    case DRAGONFLY_SIGSYS:
++      return GDB_SIGNAL_SYS;
++
++    case DRAGONFLY_SIGPIPE:
++      return GDB_SIGNAL_PIPE;
++
++    case DRAGONFLY_SIGALRM:
++      return GDB_SIGNAL_ALRM;
++
++    case DRAGONFLY_SIGTERM:
++      return GDB_SIGNAL_TERM;
++
++    case DRAGONFLY_SIGURG:
++      return GDB_SIGNAL_URG;
++
++    case DRAGONFLY_SIGSTOP:
++      return GDB_SIGNAL_STOP;
++
++    case DRAGONFLY_SIGTSTP:
++      return GDB_SIGNAL_TSTP;
++
++    case DRAGONFLY_SIGCONT:
++      return GDB_SIGNAL_CONT;
++
++    case DRAGONFLY_SIGCHLD:
++      return GDB_SIGNAL_CHLD;
++
++    case DRAGONFLY_SIGTTIN:
++      return GDB_SIGNAL_TTIN;
++
++    case DRAGONFLY_SIGTTOU:
++      return GDB_SIGNAL_TTOU;
++
++    case DRAGONFLY_SIGIO:
++      return GDB_SIGNAL_IO;
++
++    case DRAGONFLY_SIGXCPU:
++      return GDB_SIGNAL_XCPU;
++
++    case DRAGONFLY_SIGXFSZ:
++      return GDB_SIGNAL_XFSZ;
++
++    case DRAGONFLY_SIGVTALRM:
++      return GDB_SIGNAL_VTALRM;
++
++    case DRAGONFLY_SIGPROF:
++      return GDB_SIGNAL_PROF;
++
++    case DRAGONFLY_SIGWINCH:
++      return GDB_SIGNAL_WINCH;
++
++    case DRAGONFLY_SIGINFO:
++      return GDB_SIGNAL_INFO;
++
++    case DRAGONFLY_SIGUSR1:
++      return GDB_SIGNAL_USR1;
++
++    case DRAGONFLY_SIGUSR2:
++      return GDB_SIGNAL_USR2;
++
++    }
++
++  return GDB_SIGNAL_UNKNOWN;
++}
++
++/* Implement the "gdb_signal_to_target" gdbarch method.  */
++
++static int
++dfly_gdb_signal_to_target (struct gdbarch *gdbarch,
++               enum gdb_signal signal)
++{
++  switch (signal)
++    {
++    case GDB_SIGNAL_0:
++      return 0;
++
++    case GDB_SIGNAL_HUP:
++      return DRAGONFLY_SIGHUP;
++
++    case GDB_SIGNAL_INT:
++      return DRAGONFLY_SIGINT;
++
++    case GDB_SIGNAL_QUIT:
++      return DRAGONFLY_SIGQUIT;
++
++    case GDB_SIGNAL_ILL:
++      return DRAGONFLY_SIGILL;
++
++    case GDB_SIGNAL_TRAP:
++      return DRAGONFLY_SIGTRAP;
++
++    case GDB_SIGNAL_ABRT:
++      return DRAGONFLY_SIGABRT;
++
++    case GDB_SIGNAL_EMT:
++      return DRAGONFLY_SIGEMT;
++
++    case GDB_SIGNAL_FPE:
++      return DRAGONFLY_SIGFPE;
++
++    case GDB_SIGNAL_KILL:
++      return DRAGONFLY_SIGKILL;
++
++    case GDB_SIGNAL_BUS:
++      return DRAGONFLY_SIGBUS;
++
++    case GDB_SIGNAL_SEGV:
++      return DRAGONFLY_SIGSEGV;
++
++    case GDB_SIGNAL_SYS:
++      return DRAGONFLY_SIGSYS;
++
++    case GDB_SIGNAL_PIPE:
++      return DRAGONFLY_SIGPIPE;
++
++    case GDB_SIGNAL_ALRM:
++      return DRAGONFLY_SIGALRM;
++
++    case GDB_SIGNAL_TERM:
++      return DRAGONFLY_SIGTERM;
++
++    case GDB_SIGNAL_URG:
++      return DRAGONFLY_SIGURG;
++
++    case GDB_SIGNAL_STOP:
++      return DRAGONFLY_SIGSTOP;
++
++    case GDB_SIGNAL_TSTP:
++      return DRAGONFLY_SIGTSTP;
++
++    case GDB_SIGNAL_CONT:
++      return DRAGONFLY_SIGCONT;
++
++    case GDB_SIGNAL_CHLD:
++      return DRAGONFLY_SIGCHLD;
++
++    case GDB_SIGNAL_TTIN:
++      return DRAGONFLY_SIGTTIN;
++
++    case GDB_SIGNAL_TTOU:
++      return DRAGONFLY_SIGTTOU;
++
++    case GDB_SIGNAL_IO:
++      return DRAGONFLY_SIGIO;
++
++    case GDB_SIGNAL_XCPU:
++      return DRAGONFLY_SIGXCPU;
++
++    case GDB_SIGNAL_XFSZ:
++      return DRAGONFLY_SIGXFSZ;
++
++    case GDB_SIGNAL_VTALRM:
++      return DRAGONFLY_SIGVTALRM;
++
++    case GDB_SIGNAL_PROF:
++      return DRAGONFLY_SIGPROF;
++
++    case GDB_SIGNAL_WINCH:
++      return DRAGONFLY_SIGWINCH;
++
++    case GDB_SIGNAL_INFO:
++      return DRAGONFLY_SIGINFO;
++
++    case GDB_SIGNAL_USR1:
++      return DRAGONFLY_SIGUSR1;
++
++    case GDB_SIGNAL_USR2:
++      return DRAGONFLY_SIGUSR2;
++
++    }
++
++  return -1;
++}
++
++/* To be called from GDB_OSABI_DRAGONFLY handlers. */
++
++void
++dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++  set_gdbarch_gdb_signal_from_target (gdbarch, dfly_gdb_signal_from_target);
++  set_gdbarch_gdb_signal_to_target (gdbarch, dfly_gdb_signal_to_target);
++
++}
+--- /dev/null
++++ gdb/dfly-tdep.h
+@@ -0,0 +1,74 @@
++/* Target-dependent code for DragonFly, architecture independent.
++
++   Copyright (C) 2009-2023 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#ifndef DFLY_TDEP_H
++#define DFLY_TDEP_H
++
++extern void dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch);
++
++/* Output the header for "info proc files".  */
++
++extern void dfly_info_proc_files_header ();
++
++/* Output description of a single file descriptor for "info proc
++   files".  The KF_TYPE, KF_FD, KF_FLAGS, KF_OFFSET, KF_VNODE_TYPE,
++   KF_SOCK_DOMAIN, KF_SOCK_TYPE, and KF_SOCK_PROTOCOL parameters
++   should contain the value of the corresponding fields in a 'struct
++   kinfo_file'.  The KF_SA_LOCAL, KF_SA_PEER, and KF_PATH parameters
++   should contain pointers to the corresponding fields in a 'struct
++   kinfo_file'. */
++
++extern void dfly_info_proc_files_entry (int kf_type, int kf_fd, int kf_flags,
++					LONGEST kf_offset, int kf_vnode_type,
++					int kf_sock_domain, int kf_sock_type,
++					int kf_sock_protocol,
++					const void *kf_sa_local,
++					const void *kf_sa_peer,
++					const void *kf_path);
++
++/* Output the header for "info proc mappings".  ADDR_BIT is the size
++   of a virtual address in bits.  */
++
++extern void dfly_info_proc_mappings_header (int addr_bit);
++
++/* Output description of a single memory range for "info proc
++   mappings".  ADDR_BIT is the size of a virtual address in bits.  The
++   KVE_START, KVE_END, KVE_OFFSET, KVE_FLAGS, and KVE_PROTECTION
++   parameters should contain the value of the corresponding fields in
++   a 'struct kinfo_vmentry'.  The KVE_PATH parameter should contain a
++   pointer to the 'kve_path' field in a 'struct kinfo_vmentry'. */
++
++extern void dfly_info_proc_mappings_entry (int addr_bit, ULONGEST kve_start,
++					   ULONGEST kve_end,
++					   ULONGEST kve_offset,
++					   int kve_flags, int kve_protection,
++					   const void *kve_path);
++
++/* Helper function to fetch the address of a thread-local variable.
++   DTV_ADDR is the base address of the thread's dtv array.  LM_ADDR is
++   the address of the link_map structure for the associated object
++   file.  OFFSET is the offset of the variable in the object file's
++   thread-local variable block.  */
++
++extern CORE_ADDR dfly_get_thread_local_address (struct gdbarch *gdbarch,
++						CORE_ADDR dtv_addr,
++						CORE_ADDR lm_addr,
++						CORE_ADDR offset);
++
++#endif /* dfly-tdep.h */
+--- /dev/null
++++ gdb/i386-dfly-tdep.c
+@@ -0,0 +1,114 @@
++/* Target-dependent code for DragonFly/i386.
++
++   Copyright (C) 2003-2023 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "arch-utils.h"
++#include "gdbcore.h"
++#include "osabi.h"
++#include "regcache.h"
++#include "regset.h"
++#include "gdbsupport/x86-xstate.h"
++
++#include "i386-tdep.h"
++#include "i387-tdep.h"
++#include "dfly-tdep.h"
++#include "solib-svr4.h"
++
++static int i386dfly_r_reg_offset[] =
++{
++  44, /* %eax */
++  40, /* %ecx */
++  36, /* %edx */
++  32, /* %ebx */
++  72, /* %esp */
++  24, /* %ebp */
++  20, /* %esi */
++  16, /* %edi */
++  60, /* %eip */
++  68, /* %eflags */
++  64, /* %cs */
++  76, /* %ss */
++  12, /* %ds */
++  8, /* %es */
++  4, /* %fs */
++  0  /* %gs */
++};
++
++
++/* Sigtramp routine location.  */
++CORE_ADDR i386dfly_sigtramp_start_addr = 0xbfbfdf20;
++CORE_ADDR i386dfly_sigtramp_end_addr = 0xbfbfdff0;
++
++int i386dfly_sc_reg_offset[] =
++{
++  64, /* %eax */
++  60, /* %ecx */
++  56, /* %edx */
++  52, /* %ebx */
++  92, /* %esp */
++  44, /* %ebp */
++  40, /* %esi */
++  36, /* %edi */
++  80, /* %eip */
++  88, /* %eflags */
++  84, /* %cs */
++  96, /* %ss */
++  32, /* %ds */
++  28, /* %es */
++  24, /* %fs */
++  20  /* %gs */
++};
++
++
++static void
++i386dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++  i386_gdbarch_tdep *tdep = gdbarch_tdep<i386_gdbarch_tdep> (gdbarch);
++
++  /* Generic DragonFly support. */
++  dfly_init_abi (info, gdbarch);
++
++  /* Obviously DragonFly is BSD-based.  */
++  i386bsd_init_abi (info, gdbarch);
++
++  i386_elf_init_abi (info, gdbarch);
++
++  tdep->gregset_reg_offset = i386dfly_r_reg_offset;
++  tdep->gregset_num_regs = ARRAY_SIZE (i386dfly_r_reg_offset);
++  tdep->sizeof_gregset = 80;
++
++  tdep->sc_reg_offset = i386dfly_sc_reg_offset;
++  tdep->sc_num_regs = ARRAY_SIZE (i386dfly_sc_reg_offset);
++
++  /* DragonFly uses SVR4-style shared libraries.  */
++  set_solib_svr4_fetch_link_map_offsets
++    (gdbarch, svr4_ilp32_fetch_link_map_offsets);
++
++}
++
++
++/* Provide a prototype to silence -Wmissing-prototypes.  */
++void _initialize_i386dfly_tdep ();
++
++void
++_initialize_i386dfly_tdep ()
++{
++  gdbarch_register_osabi (bfd_arch_i386, 0, GDB_OSABI_DRAGONFLY,
++			  i386dfly_init_abi);
++}
+--- gdb/Makefile.in.orig
++++ gdb/Makefile.in
+@@ -738,6 +738,7 @@
+ 	alpha-tdep.o \
+ 	amd64-darwin-tdep.o \
+ 	amd64-dicos-tdep.o \
++	amd64-dfly-tdep.o \
+ 	amd64-fbsd-tdep.o \
+ 	amd64-linux-tdep.o \
+ 	amd64-netbsd-tdep.o \
+@@ -815,6 +816,7 @@
+ 	csky-linux-tdep.o \
+ 	csky-tdep.o \
+ 	dicos-tdep.o \
++	dfly-tdep.o \
+ 	fbsd-tdep.o \
+ 	frv-linux-tdep.o \
+ 	frv-tdep.o \
+@@ -829,6 +831,7 @@
+ 	i386-bsd-tdep.o \
+ 	i386-darwin-tdep.o \
+ 	i386-dicos-tdep.o \
++	i386-dfly-tdep.o \
+ 	i386-fbsd-tdep.o \
+ 	i386-gnu-tdep.o \
+ 	i386-go32-tdep.o \
+@@ -1369,6 +1372,8 @@
+ 	extract-store-integer.h \
+ 	f-array-walker.h \
+ 	f-lang.h \
++	dfly-nat.h \
++	dfly-tdep.h \
+ 	fbsd-nat.h \
+ 	fbsd-tdep.h \
+ 	filesystem.h \
+--- gdb/aarch64-linux-tdep.c.orig
++++ gdb/aarch64-linux-tdep.c
+@@ -2455,13 +2455,13 @@
+     return;
+ 
+   CORE_ADDR fault_addr = 0;
+-  long si_code = 0;
++  long db_si_code = 0;
+ 
+   try
+     {
+       /* Sigcode tells us if the segfault is actually a memory tag
+ 	 violation.  */
+-      si_code = parse_and_eval_long ("$_siginfo.si_code");
++      db_si_code = parse_and_eval_long ("$_siginfo.si_code");
+ 
+       fault_addr
+ 	= parse_and_eval_long ("$_siginfo._sifields._sigfault.si_addr");
+@@ -2473,7 +2473,7 @@
+     }
+ 
+   /* If this is not a memory tag violation, just return.  */
+-  if (si_code != SEGV_MTEAERR && si_code != SEGV_MTESERR)
++  if (db_si_code != SEGV_MTEAERR && db_si_code != SEGV_MTESERR)
+     return;
+ 
+   uiout->text ("\n");
+@@ -2481,7 +2481,7 @@
+   uiout->field_string ("sigcode-meaning", _("Memory tag violation"));
+ 
+   /* For synchronous faults, show additional information.  */
+-  if (si_code == SEGV_MTESERR)
++  if (db_si_code == SEGV_MTESERR)
+     {
+       uiout->text (_(" while accessing address "));
+       uiout->field_core_addr ("fault-addr", gdbarch, fault_addr);
+--- gdb/amd64-tdep.h.orig
++++ gdb/amd64-tdep.h
+@@ -146,4 +146,9 @@
+ /* Variables exported from amd64-obsd-tdep.c.  */
+ extern int amd64obsd_r_reg_offset[];
+ 
++/* Variables exported from amd64-dfly-tdep.c.  */
++extern CORE_ADDR amd64dfly_sigtramp_start_addr;
++extern CORE_ADDR amd64dfly_sigtramp_end_addr;
++extern int amd64dfly_sc_reg_offset[];
++
+ #endif /* GDB_AMD64_TDEP_H */
+--- gdb/bsd-kvm.c.orig
++++ gdb/bsd-kvm.c
+@@ -40,7 +40,9 @@
+ #include <paths.h>
+ #include "readline/readline.h"
+ #include <sys/param.h>
++#if !defined(__DragonFly__)
+ #include <sys/proc.h>
++#endif
+ #ifdef HAVE_SYS_USER_H
+ #include <sys/user.h>
+ #endif
+@@ -326,7 +328,9 @@
+ #ifdef HAVE_STRUCT_LWP
+   addr += offsetof (struct lwp, l_addr);
+ #else
++# ifndef __DragonFly__  /* XXX FIXME */
+   addr += offsetof (struct proc, p_addr);
++# endif
+ #endif
+ 
+   if (kvm_read (core_kd, addr, &bsd_kvm_paddr, sizeof bsd_kvm_paddr) == -1)
+--- gdb/configure.host.orig
++++ gdb/configure.host
+@@ -174,6 +174,7 @@
+ vax-*-openbsd*)		gdb_host=obsd ;;
+ 
+ x86_64-*-linux*)	gdb_host=linux64 ;;
++x86_64-*-dragonfly*)	gdb_host=dfly64 ;;
+ x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)
+ 			gdb_host=fbsd64 ;;
+ x86_64-*-netbsd* | x86_64-*-knetbsd*-gnu)
+--- gdb/configure.nat.orig
++++ gdb/configure.nat
+@@ -62,6 +62,11 @@
+ 	NAT_CDEPS='$(srcdir)/proc-service.list'
+ 	LOADLIBES='-ldl $(RDYNAMIC)'
+ 	;;
++    dfly*)
++	NATDEPFILES='fork-child.o nat/fork-inferior.o inf-ptrace.o dfly-nat.o'
++	HAVE_NATIVE_GCORE_HOST=1
++	LOADLIBES='-lkvm'
++	;;
+     fbsd*)
+ 	NATDEPFILES='fork-child.o nat/fork-inferior.o inf-ptrace.o fbsd-nat.o'
+ 	HAVE_NATIVE_GCORE_HOST=1
+@@ -200,6 +205,16 @@
+ 		;;
+ 	esac
+ 	;;
++    dfly64)
++	case ${gdb_host_cpu} in
++	    i386)
++		# Host: DragonFly/amd64
++		NATDEPFILES="${NATDEPFILES} amd64-nat.o amd64-bsd-nat.o \
++		amd64-dfly-nat.o bsd-kvm.o x86-nat.o nat/x86-dregs.o \
++		x86-bsd-nat.o"
++		;;
++	esac
++	;;
+     go32)
+ 	case ${gdb_host_cpu} in
+ 	    i386)
+--- gdb/configure.tgt.orig
++++ gdb/configure.tgt
+@@ -122,6 +122,8 @@
+ # 2. Get the objects per os in $TARG.
+ 
+ case "${targ}" in
++*-*-dragonfly*)
++	os_obs="dfly-tdep.o solib-svr4.o";;
+ *-*-freebsd* | *-*-kfreebsd*-gnu)
+ 	os_obs="fbsd-tdep.o solib-svr4.o";;
+ *-*-netbsd* | *-*-knetbsd*-gnu)
+@@ -710,6 +712,11 @@
+ 			arch/i386-linux-tdesc.o arch/amd64-linux-tdesc.o \
+ 			arch/x86-linux-tdesc-features.o"
+ 	;;
++x86_64-*-dragonfly*)
++	# Target: DragonFly/amd64
++	gdb_target_obs="amd64-dfly-tdep.o ${i386_tobjs} \
++			i386-bsd-tdep.o i386-dfly-tdep.o"
++	;;
+ x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)
+ 	# Target: FreeBSD/amd64
+ 	gdb_target_obs="amd64-fbsd-tdep.o ${i386_tobjs} \
+@@ -788,6 +795,8 @@
+ # map target onto default OS ABI
+ 
+ case "${targ}" in
++*-*-dragonfly*)
++		gdb_osabi=GDB_OSABI_DRAGONFLY ;;
+ *-*-freebsd* | *-*-kfreebsd*-gnu)
+ 		gdb_osabi=GDB_OSABI_FREEBSD ;;
+ *-*-linux* | *-*-uclinux*)
+--- gdb/gdb_wchar.h.orig
++++ gdb/gdb_wchar.h
+@@ -59,7 +59,7 @@
+    iconvlist.  */
+ #if defined (HAVE_ICONV) && defined (HAVE_BTOWC) \
+   && (defined (__STDC_ISO_10646__) \
+-      || (defined (_LIBICONV_VERSION) && _LIBICONV_VERSION >= 0x108))
++      || (!defined (LIBICONV_PLUG) && defined (_LIBICONV_VERSION) && _LIBICONV_VERSION >= 0x108))
+ 
+ typedef wchar_t gdb_wchar_t;
+ typedef wint_t gdb_wint_t;
+@@ -93,7 +93,7 @@
+ #define INTERMEDIATE_ENCODING intermediate_encoding ()
+ const char *intermediate_encoding (void);
+ 
+-#elif defined (_LIBICONV_VERSION) && _LIBICONV_VERSION >= 0x108
++#elif !defined (LIBICONV_PLUG) && defined (_LIBICONV_VERSION) && _LIBICONV_VERSION >= 0x108
+ #define INTERMEDIATE_ENCODING "wchar_t"
+ #else
+ /* This shouldn't happen, because the earlier #if should have filtered
+--- gdb/i386-bsd-nat.c.orig
++++ gdb/i386-bsd-nat.c
+@@ -249,6 +249,8 @@
+ 
+ #if defined (OpenBSD)
+ #define SC_REG_OFFSET i386obsd_sc_reg_offset
++#elif defined (DragonFly)
++#define SC_REG_OFFSET i386dfly_sc_reg_offset
+ #endif
+ 
+ #ifdef SC_REG_OFFSET
+--- gdb/i386-fbsd-nat.c.orig
++++ gdb/i386-fbsd-nat.c
+@@ -39,8 +39,6 @@
+   void store_registers (struct regcache *, int) override;
+ 
+   const struct target_desc *read_description () override;
+-
+-  void resume (ptid_t, int, enum gdb_signal) override;
+ };
+ 
+ static i386_fbsd_nat_target the_i386_fbsd_nat_target;
+@@ -215,6 +213,7 @@
+     perror_with_name (_("Couldn't write floating point status"));
+ }
+ 
++#if 0
+ /* Resume execution of the inferior process.  If STEP is nonzero,
+    single-step it.  If SIGNAL is nonzero, give it that signal.  */
+ 
+@@ -261,6 +260,7 @@
+ 	      gdb_signal_to_host (signal)) == -1)
+     perror_with_name (("ptrace"));
+ }
++#endif
+ 
+ 
+ /* Support for debugging kernel virtual memory images.  */
+--- gdb/i386-tdep.h.orig
++++ gdb/i386-tdep.h
+@@ -456,8 +456,11 @@
+ /* Functions and variables exported from i386-bsd-tdep.c.  */
+ 
+ extern void i386bsd_init_abi (struct gdbarch_info, struct gdbarch *);
++extern CORE_ADDR i386dfly_sigtramp_start_addr;
++extern CORE_ADDR i386dfly_sigtramp_end_addr;
+ extern CORE_ADDR i386obsd_sigtramp_start_addr;
+ extern CORE_ADDR i386obsd_sigtramp_end_addr;
++extern int i386dfly_sc_reg_offset[];
+ extern int i386obsd_sc_reg_offset[];
+ extern int i386bsd_sc_reg_offset[];
+ 
+--- gdb/inflow.c.orig
++++ gdb/inflow.c
+@@ -872,7 +872,10 @@
+ pass_signal (int signo)
+ {
+ #ifndef _WIN32
+-  kill (inferior_ptid.pid (), SIGINT);
++  if (inferior_ptid.pid () )
++    kill (inferior_ptid.pid (), SIGINT);
++  else
++    kill (current_inferior ()->pid, SIGINT);
+ #endif
+ }
+ 
+--- gdb/osabi.c.orig
++++ gdb/osabi.c
+@@ -427,6 +427,15 @@
+ 	  return;
+ 	}
+ 
++      /* DragonFly.  */
++      if (check_note (abfd, sect, note, &sectsize, "DragonFly", 4,
++		      NT_DRAGONFLY_ABI_TAG))
++	{
++	  /* There is no need to check the version yet.  */
++	  *osabi = GDB_OSABI_DRAGONFLY;
++	  return;
++	}
++
+       /* FreeBSD.  */
+       if (check_note (abfd, sect, note, &sectsize, "FreeBSD", 4,
+ 		      NT_FREEBSD_ABI_TAG))
+--- gdb/python/python-config.py.orig
++++ gdb/python/python-config.py
+@@ -65,6 +65,8 @@
+ 
+     elif opt in ("--libs", "--ldflags"):
+         libs = ["-lpython" + pyver + abiflags]
++        if getvar('LDFLAGS') is not None:
++            libs.extend(getvar('LDFLAGS').split())
+         if getvar("LIBS") is not None:
+             libs.extend(getvar("LIBS").split())
+         if getvar("SYSLIBS") is not None:
+--- gdb/sparc64-linux-tdep.c.orig
++++ gdb/sparc64-linux-tdep.c
+@@ -129,14 +129,14 @@
+     return;
+ 
+   CORE_ADDR addr = 0;
+-  long si_code = 0;
++  long db_si_code = 0;
+ 
+   try
+     {
+-      /* Evaluate si_code to see if the segfault is ADI related.  */
+-      si_code = parse_and_eval_long ("$_siginfo.si_code\n");
++      /* Evaluate db_si_code to see if the segfault is ADI related.  */
++      db_si_code = parse_and_eval_long ("$_siginfo.si_code\n");
+ 
+-      if (si_code >= SEGV_ACCADI && si_code <= SEGV_ADIPERR)
++      if (db_si_code >= SEGV_ACCADI && db_si_code <= SEGV_ADIPERR)
+ 	addr = parse_and_eval_long ("$_siginfo._sifields._sigfault.si_addr");
+     }
+   catch (const gdb_exception_error &exception)
+@@ -145,7 +145,7 @@
+     }
+ 
+   /* Print out ADI event based on sig_code value */
+-  switch (si_code)
++  switch (db_si_code)
+     {
+     case SEGV_ACCADI:	/* adi not enabled */
+       uiout->text ("\n");
