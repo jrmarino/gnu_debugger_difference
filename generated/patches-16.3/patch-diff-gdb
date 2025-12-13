@@ -1639,3 +1639,13 @@
      {
      case SEGV_ACCADI:	/* adi not enabled */
        uiout->text ("\n");
+--- gdbsupport/osabi.def.orig
++++ gdbsupport/osabi.def
+@@ -41,6 +41,7 @@
+ GDB_OSABI_DEF (FREEBSD, "FreeBSD", nullptr)
+ GDB_OSABI_DEF (NETBSD, "NetBSD", nullptr)
+ GDB_OSABI_DEF (OPENBSD, "OpenBSD", nullptr)
++GDB_OSABI_DEF (DRAGONFLY, "DragonFly", nullptr)
+ GDB_OSABI_DEF (WINCE, "WindowsCE", nullptr)
+ GDB_OSABI_DEF (GO32, "DJGPP", nullptr)
+ GDB_OSABI_DEF (CYGWIN, "Cygwin", nullptr)

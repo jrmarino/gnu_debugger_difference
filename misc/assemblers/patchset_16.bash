@@ -52,7 +52,7 @@ function regenerate_patch () {
    PATCH_SUFFIX=${1}
    FLUX_NAME=${2}
    PATCH_FILE=${OUTPUT_DIR}/diff-${PATCH_SUFFIX}
-   FLUX_PATCH=${BUGDIFF}/../misc/flux_patches_v15/${FLUX_NAME}
+   FLUX_PATCH=${BUGDIFF}/../misc/flux_patches_v16/${FLUX_NAME}
    AWKCMD='{if (substr($2,0,2) == "b/") print substr($2,3); else print $2}'
    AWKCM2='NR==1 {if (substr($2,0,2) == "b/") print "-p1"}'
 
@@ -103,20 +103,19 @@ regenerate_patch ${MAIN_SUFFIX} patch-gdb_bsd-kvm.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.host
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.nat
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_configure.tgt
-regenerate_patch ${MAIN_SUFFIX} patch-gdb_fbsd-nat.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_gdb__wchar.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-bsd-nat.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-fbsd-nat.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_i386-tdep.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_inflow.c
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_osabi.c
-regenerate_patch ${MAIN_SUFFIX} patch-gdb_osabi.h
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_python_python-config.py
 regenerate_patch ${MAIN_SUFFIX} patch-gdb_sparc64-linux-tdep.c
 
 reset_patch ${REST_SUFFIX}
 regenerate_patch ${REST_SUFFIX} patch-bfd_config.bfd
 regenerate_patch ${REST_SUFFIX} patch-gdbsupport_common-defs.h
+regenerate_patch ${MAIN_SUFFIX} patch-gdbsupport_osabi.def
 regenerate_patch ${REST_SUFFIX} patch-gnulib_import_stddef.in.h
 regenerate_patch ${REST_SUFFIX} patch-include_elf_common.h
 
