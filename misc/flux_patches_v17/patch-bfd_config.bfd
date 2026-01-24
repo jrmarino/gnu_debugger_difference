@@ -1,0 +1,11 @@
+--- bfd/config.bfd.orig
++++ bfd/config.bfd
+@@ -677,7 +677,7 @@ case "${targ}" in
+     ;;
+   x86_64-*-dragonfly*)
+     targ_defvec=x86_64_elf64_vec
+-    targ_selvecs="i386_elf32_vec iamcu_elf32_vec"
++    targ_selvecs="i386_elf32_vec iamcu_elf32_vec x86_64_pei_vec"
+     want64=true
+     ;;
+   x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)

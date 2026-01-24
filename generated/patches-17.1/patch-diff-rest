@@ -1,0 +1,50 @@
+--- bfd/config.bfd.orig
++++ bfd/config.bfd
+@@ -677,7 +677,7 @@ case "${targ}" in
+     ;;
+   x86_64-*-dragonfly*)
+     targ_defvec=x86_64_elf64_vec
+-    targ_selvecs="i386_elf32_vec iamcu_elf32_vec"
++    targ_selvecs="i386_elf32_vec iamcu_elf32_vec x86_64_pei_vec"
+     want64=true
+     ;;
+   x86_64-*-freebsd* | x86_64-*-kfreebsd*-gnu)
+--- gdbsupport/common-defs.h.orig
++++ gdbsupport/common-defs.h
+@@ -62,9 +62,15 @@
+ 
+    Must do this before including any system header, since other system
+    headers may include stdint.h/inttypes.h.  */
++#ifndef __STDC_CONSTANT_MACROS
+ #define __STDC_CONSTANT_MACROS 1
++#endif
++#ifndef __STDC_LIMIT_MACROS
+ #define __STDC_LIMIT_MACROS 1
++#endif
++#ifndef __STDC_FORMAT_MACROS
+ #define __STDC_FORMAT_MACROS 1
++#endif
+ 
+ /* Some distros enable _FORTIFY_SOURCE by default, which on occasion
+    has caused build failures with -Wunused-result when a patch is
+--- gnulib/import/stddef.in.h.orig
++++ gnulib/import/stddef.in.h
+@@ -116,7 +116,7 @@ typedef long max_align_t;
+     && defined __cplusplus
+ # include <cstddef>
+ #else
+-# if ! (@HAVE_MAX_ALIGN_T@ || (defined _GCC_MAX_ALIGN_T && !defined __clang__))
++# if 0
+ #  if !GNULIB_defined_max_align_t
+ /* On the x86, the maximum storage alignment of double, long, etc. is 4,
+    but GCC's C11 ABI for x86 says that max_align_t has an alignment of 8,
+--- include/elf/common.h.orig
++++ include/elf/common.h
+@@ -1080,6 +1080,7 @@
+ /* Values for FreeBSD .note.ABI-tag notes.  Note name is "FreeBSD".  */
+ 
+ #define NT_FREEBSD_ABI_TAG	1
++#define NT_DRAGONFLY_ABI_TAG	1
+ 
+ /* Values for FDO .note.package notes as defined on https://systemd.io/COREDUMP_PACKAGE_METADATA/  */
+ #define FDO_PACKAGING_METADATA	0xcafe1a7e
