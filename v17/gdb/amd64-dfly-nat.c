@@ -275,9 +275,7 @@ amd64_dfly_nat_target::post_startup_inferior (ptid_t pid)
 #endif
 }
 
-void _initialize_amd64dfly_nat ();
-void
-_initialize_amd64dfly_nat ()
+INIT_GDB_FILE (amd64dfly_nat)
 {
   int offset;
 

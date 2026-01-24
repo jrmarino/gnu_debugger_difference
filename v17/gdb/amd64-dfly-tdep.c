@@ -145,16 +145,13 @@ amd64dfly_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
   tdep->sc_num_regs = ARRAY_SIZE (amd64dfly_sc_reg_offset);
 
   /* FreeBSD uses SVR4-style shared libraries.  */
-  set_solib_svr4_fetch_link_map_offsets
-    (gdbarch, svr4_lp64_fetch_link_map_offsets);
+  set_solib_svr4_ops (gdbarch, make_svr4_lp64_solib_ops);
 
   set_gdbarch_fetch_tls_load_module_address (gdbarch,
 					     svr4_fetch_objfile_link_map);
 }
 
-void _initialize_amd64dfly_tdep ();
-void
-_initialize_amd64dfly_tdep ()
+INIT_GDB_FILE (amd64dfly_nat)
 {
   gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64,
 			  GDB_OSABI_DRAGONFLY, amd64dfly_init_abi);
