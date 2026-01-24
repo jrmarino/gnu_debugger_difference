@@ -162,9 +162,6 @@ dfly_nat_add_target (struct target_ops *t)
 }
 #endif
 
-/* Provide a prototype to silence -Wmissing-prototypes.  */
-extern initialize_file_ftype _initialize_dfly_nat;
-
 INIT_GDB_FILE (dfly_nat)
 {
 /* XXX: todo add_setshow_boolean_cmd() */

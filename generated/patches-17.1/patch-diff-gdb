@@ -522,7 +522,7 @@
 +}
 --- /dev/null
 +++ gdb/dfly-nat.c
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,168 @@
 +/* Native-dependent code for DragonFly.
 +
 +   Copyright (C) 2002-2023 Free Software Foundation, Inc.
@@ -686,9 +686,6 @@
 +  add_target (t);
 +}
 +#endif
-+
-+/* Provide a prototype to silence -Wmissing-prototypes.  */
-+extern initialize_file_ftype _initialize_dfly_nat;
 +
 +INIT_GDB_FILE (dfly_nat)
 +{
