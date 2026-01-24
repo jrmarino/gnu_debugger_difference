@@ -1,6 +1,6 @@
 --- /dev/null
 +++ gdb/amd64-dfly-nat.c
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,358 @@
 +/* Native-dependent code for DragonFly/amd64.
 +
 +   Copyright (C) 2003-2019 Free Software Foundation, Inc.
@@ -278,9 +278,7 @@
 +#endif
 +}
 +
-+void _initialize_amd64dfly_nat ();
-+void
-+_initialize_amd64dfly_nat ()
++INIT_GDB_FILE (amd64dfly_nat)
 +{
 +  int offset;
 +
@@ -363,7 +361,7 @@
 +}
 --- /dev/null
 +++ gdb/amd64-dfly-tdep.c
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,158 @@
 +/* Target-dependent code for DragonFly/amd64.
 +
 +   Copyright (C) 2003-2019 Free Software Foundation, Inc.
@@ -511,16 +509,13 @@
 +  tdep->sc_num_regs = ARRAY_SIZE (amd64dfly_sc_reg_offset);
 +
 +  /* FreeBSD uses SVR4-style shared libraries.  */
-+  set_solib_svr4_fetch_link_map_offsets
-+    (gdbarch, svr4_lp64_fetch_link_map_offsets);
++  set_solib_svr4_ops (gdbarch, make_svr4_lp64_solib_ops);
 +
 +  set_gdbarch_fetch_tls_load_module_address (gdbarch,
 +					     svr4_fetch_objfile_link_map);
 +}
 +
-+void _initialize_amd64dfly_tdep ();
-+void
-+_initialize_amd64dfly_tdep ()
++INIT_GDB_FILE (amd64dfly_nat)
 +{
 +  gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64,
 +			  GDB_OSABI_DRAGONFLY, amd64dfly_init_abi);
